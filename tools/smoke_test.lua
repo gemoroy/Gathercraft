@@ -8847,6 +8847,328 @@ step("Sharing: turning the chat line off also drops a line that was already on i
     advance(400)
     if not ok then error(err, 0) end
 end)
+-- ---------------------------------------------------------------- v0.1.22, part W: the paths you ride
+-- A small world for the steps about recorded paths: one zone of 5000 x 2500
+-- yards, a player who is moved by hand and looked at twice a second.
+local function PathsWorld()
+    local HBD = LibStub("HereBeDragons-2.0")
+    local W = { speed = 7, falling = false, swimming = false, w = 5000, h = 2500,
+        keep = { size = HBD.GetZoneSize, speed = GetUnitSpeed, fall = IsFalling, swim = IsSwimming, inst = IsInInstance, taxi = UnitOnTaxi,
+            dead = UnitIsDeadOrGhost, vehicle = UnitInVehicle, fly = IsFlying, map = player.map, x = player.x, y = player.y,
+            paths = ns.db.paths, secret = issecretvalue, pos = C_Map.GetPlayerMapPosition } }
+    HBD.GetZoneSize = function(_, mapID) if (mapID == 1412 or mapID == 1411) and not W.noSize then return W.w, W.h end return 0, 0 end
+    GetUnitSpeed = function() return W.speed end
+    IsFalling = function() return W.falling end
+    IsSwimming = function() return W.swimming end
+    IsInInstance = function() return false, "none" end
+    UnitOnTaxi = function() return false end
+    UnitIsDeadOrGhost = function() return false end
+    UnitInVehicle = function() return false end
+    IsFlying = function() return false end
+    ns.db.paths = nil
+    ns.PathsSetEnabled(true)
+    player.map = 1412
+    -- the player at this many yards from the zone's top left corner
+    function W.At(yx, yy) player.x, player.y = yx / W.w, yy / W.h end
+    function W.Where() return player.x * W.w, player.y * W.h end
+    -- the middle of a square
+    function W.Mid(tx, ty) W.At(tx * 25 + 12.5, ty * 25 + 12.5) end
+    -- one look later, moved by (dx, dy) yards
+    function W.Step(dx, dy)
+        local x, y = W.Where()
+        W.At(x + (dx or 0), y + (dy or 0))
+        advance(0.5)
+    end
+    -- `yards` in the direction (ux, uy), `per` yards a look
+    function W.Go(ux, uy, yards, per)
+        per = per or W.speed * 0.5
+        for _ = 1, math.floor(yards / per + 0.5) do W.Step(ux * per, uy * per) end
+    end
+    -- a place nothing was learned at before: stand there, be seen once (it is more than one
+    -- square from where you were: that alone is a new start)
+    function W.Start(tx, ty)
+        W.Mid(tx, ty)
+        advance(0.5)
+    end
+    function W.Piece(tx, ty, dx, dy) return ns.PathsPiece(1412, tx, ty, dx, dy) end
+    function W.Total() return (ns.PathsCount()) end
+    function W.Done()
+        local k = W.keep
+        HBD.GetZoneSize, GetUnitSpeed, IsFalling, IsSwimming, IsInInstance, UnitOnTaxi = k.size, k.speed, k.fall, k.swim, k.inst, k.taxi
+        UnitIsDeadOrGhost, UnitInVehicle, IsFlying, issecretvalue, C_Map.GetPlayerMapPosition = k.dead, k.vehicle, k.fly, k.secret, k.pos
+        player.map, player.x, player.y = k.map, k.x, k.y
+        ns.db.paths = k.paths
+        fire("PLAYER_ENTERING_WORLD")
+        advance(1)
+    end
+    return W
+end
+
+step("Paths: crossing from one 25-yard square into the next is counted, with a cost that does not depend on your speed (v0.1.22 W1, W2)", function()
+    -- Sven, 12.11.2026: "wir brauchen die Routen". Collected only: every
+    -- crossing between neighbouring squares with how often, its cost (the way
+    -- made in the square you left, time x speed, over the straight line
+    -- between the centres), falls, swims and the day.
+    local W = PathsWorld()
+    local ok, err = pcall(function()
+        assert(ns.PathsEnabled() == true and W.Total() == 0, "test setup: recording on, nothing recorded")
+        local sx, sy = ns.PathsSquare(1412, 0.5, 0.5)
+        assert(sx == 100 and sy == 50, ("the middle of a 5000 x 2500 yard zone is square 100, 50 - got %s, %s"):format(tostring(sx), tostring(sy)))
+
+        -- on foot, 7 yards a second, 150 yards east along the middle of a row
+        W.speed = 7
+        W.Start(100, 50)
+        W.Go(1, 0, 150)
+        for tx = 100, 104 do
+            local count, cost, falls, swims, day = W.Piece(tx, 50, 1, 0)
+            assert(count == 1, ("square %d -> %d: counted %s times, want 1"):format(tx, tx + 1, tostring(count)))
+            assert(falls == 0 and swims == 0, "a walk on dry land has falls or swims")
+            assert(day == math.floor(time() / 86400) - 20454, "the day of the piece is " .. tostring(day))
+            if tx > 100 then assert(cost >= 1 and cost <= 1.15, ("straight through square %d: cost %.2f, want about 1"):format(tx, cost)) end
+        end
+        assert(W.Total() == 6, "150 yards east from the middle of a square are 6 crossings, counted " .. W.Total())
+        assert(W.Piece(101, 50, -1, 0) == nil, "the way back was counted without being ridden")
+        assert(W.Piece(101, 50, 0, 1) == nil and W.Piece(101, 49, 1, 0) == nil, "a piece next to the way was counted")
+
+        -- the same kind of stretch on a mount at 14 and at 20 yards a second: the same cost
+        for i, speed in ipairs({ 14, 20 }) do
+            W.speed = speed
+            W.Start(100, 52 + i)
+            W.Go(1, 0, 150)
+            local _, cost = W.Piece(102, 52 + i, 1, 0)
+            assert(cost and cost >= 1 and cost <= 1.25, ("at %d yards a second: cost %s, want about 1"):format(speed, tostring(cost)))
+        end
+
+        -- a detour: 7 yards a second on your feet, but only 3.5 a second forward
+        W.speed = 7
+        W.Start(100, 56)
+        W.Go(1, 0, 100, 1.75)
+        local _, detour = W.Piece(102, 56, 1, 0)
+        assert(detour and detour >= 1.8 and detour <= 2.2, ("twice the way through a square: cost %s, want about 2"):format(tostring(detour)))
+
+        -- the same piece again, straight this time: counted twice, the cost is the mean
+        W.Start(100, 56)
+        W.Go(1, 0, 100)
+        local count, mean = W.Piece(102, 56, 1, 0)
+        assert(count == 2 and mean > 1.3 and mean < 1.7, ("once about 2, once about 1: count %s, cost %s"):format(tostring(count), tostring(mean)))
+
+        -- across a corner: the straight line is longer (35 yards), the cost is about 1 again
+        W.speed = 7
+        W.Start(100, 60)
+        W.Go(1, 1, 100, 2.5)
+        local c, diagonal = W.Piece(102, 62, 1, 1)
+        assert(c == 1 and diagonal >= 1 and diagonal <= 1.15, ("diagonally: count %s, cost %s"):format(tostring(c), tostring(diagonal)))
+
+        -- the way back is a piece of its own
+        W.Start(104, 64)
+        W.Go(-1, 0, 100)
+        assert(W.Piece(103, 64, -1, 0) == 1 and W.Piece(102, 64, 1, 0) == nil, "riding west: the piece west, not the piece east")
+
+        -- standing still learns nothing and costs nothing later
+        local before = W.Total()
+        W.speed = 0
+        W.Start(100, 66)
+        advance(30)
+        W.speed = 7
+        W.Go(1, 0, 60)
+        local _, afterRest = W.Piece(101, 66, 1, 0)
+        assert(W.Total() == before + 2 and afterRest <= 1.15, ("a rest of 30 s made the next square cost %s"):format(tostring(afterRest)))
+
+        -- a fall: in the air for a second or more while crossing - a jump is not one
+        W.Start(100, 70)
+        W.Go(1, 0, 7)
+        W.falling = true
+        W.Go(1, 0, 14) -- 2 s in the air, into square 101
+        W.falling = false
+        W.Go(1, 0, 30)
+        local _, _, falls = W.Piece(100, 70, 1, 0)
+        assert(falls == 1, "two seconds in the air on the way out of the square: " .. tostring(falls) .. " falls, want 1")
+        W.Start(100, 72)
+        W.Go(1, 0, 7)
+        W.falling = true
+        W.Go(1, 0, 3.5) -- half a second: a jump
+        W.falling = false
+        W.Go(1, 0, 30)
+        _, _, falls = W.Piece(100, 72, 1, 0)
+        assert(falls == 0, "a jump was taken for a fall")
+
+        -- swimming, where the client tells it
+        W.Start(100, 74)
+        W.swimming = true
+        W.Go(1, 0, 40)
+        W.swimming = false
+        local _, _, _, swims = W.Piece(100, 74, 1, 0)
+        assert(swims == 1, "swum out of the square: " .. tostring(swims) .. " swims, want 1")
+        -- ... and a client without the function (not seen live yet: Sven had no water on 12.11.)
+        local before2, errorsBefore = W.Total(), #errors
+        IsSwimming = nil
+        W.Start(100, 76)
+        W.Go(1, 0, 40)
+        assert(#errors == errorsBefore and W.Total() == before2 + 2, "without IsSwimming nothing is learned any more")
+        _, _, _, swims = W.Piece(100, 76, 1, 0)
+        assert(swims == 0, "no IsSwimming, and a swim was counted")
+
+        -- what is kept: numbers only - no names, no times, no trace
+        local p = ns.db.paths
+        local sum = 0
+        for key, value in pairs(p) do
+            assert(key == "zones" or key == "total" or key == "off", "saved with the paths: " .. tostring(key))
+            assert(type(value) ~= "string", "a text is saved with the paths")
+        end
+        for mapID, z in pairs(p.zones) do
+            assert(type(mapID) == "number", "a zone is not kept by its number")
+            for key, value in pairs(z) do assert(key == "n" or key == "e", "saved with a zone: " .. tostring(key)) end
+            local n = 0
+            for key, value in pairs(z.e) do
+                assert(type(key) == "number" and type(value) == "number" and value == math.floor(value) and value < 2 ^ 48, "a piece is not one whole number")
+                n = n + 1
+            end
+            assert(n == z.n, "the zone's count is " .. tostring(z.n) .. ", it holds " .. n)
+            sum = sum + n
+        end
+        assert(sum == p.total and sum == W.Total(), "the total is " .. tostring(p.total) .. ", there are " .. sum)
+    end)
+    W.Done()
+    if not ok then error(err, 0) end
+end)
+
+step("Paths: nothing is learned where you are carried, dead, in an instance, teleported or where the client hides values (v0.1.22 W3)", function()
+    local W = PathsWorld()
+    local SECRET = newproxy(true)
+    local row = 80
+    -- a straight ride of 60 yards from the middle of a fresh row; returns how many pieces it made
+    local function Ride(prepare, undo)
+        row = row + 2
+        W.Start(100, row)
+        local before = W.Total()
+        if prepare then prepare() end
+        W.Go(1, 0, 60, 3.5)
+        if undo then undo() end
+        return W.Total() - before
+    end
+    local ok, err = pcall(function()
+        assert(Ride() == 2, "test setup: a plain ride of 60 yards makes 2 pieces")
+        local cases = {
+            { "in an instance", function() IsInInstance = function() return true, "party" end end, function() IsInInstance = function() return false, "none" end end },
+            { "on a flight path", function() UnitOnTaxi = function() return true end end, function() UnitOnTaxi = function() return false end end },
+            { "dead or a ghost", function() UnitIsDeadOrGhost = function() return true end end, function() UnitIsDeadOrGhost = function() return false end end },
+            { "in a vehicle", function() UnitInVehicle = function() return true end end, function() UnitInVehicle = function() return false end end },
+            { "flying", function() IsFlying = function() return true end end, function() IsFlying = function() return false end end },
+            { "carried (no speed of your own)", function() W.speed = 0 end, function() W.speed = 7 end },
+            { "a hidden speed", function() issecretvalue = function(v) return rawequal(v, SECRET) end W.speed = SECRET end, function() W.speed = 7 issecretvalue = W.keep.secret end },
+            { "a hidden position", function()
+                issecretvalue = function(v) return rawequal(v, SECRET) end
+                C_Map.GetPlayerMapPosition = function() return { GetXY = function() return SECRET, SECRET end } end
+            end, function() C_Map.GetPlayerMapPosition = W.keep.pos issecretvalue = W.keep.secret end },
+            { "a zone without a size", function() W.noSize = true end, function() W.noSize = false end },
+            { "recording turned off", function() ns.PathsSetEnabled(false) end, function() ns.PathsSetEnabled(true) end },
+        }
+        for _, c in ipairs(cases) do
+            local errorsBefore = #errors
+            local made = Ride(c[2], c[3])
+            assert(#errors == errorsBefore, c[1] .. ": an error")
+            assert(made == 0, c[1] .. ": " .. made .. " pieces learned, want none")
+            -- ... and right after it everything is learned again
+            assert(Ride() == 2, "after \"" .. c[1] .. "\" a plain ride makes no pieces any more")
+        end
+        assert(ns.db.paths.off == nil, "turned on again, and the saved data still says off")
+        ns.PathsSetEnabled(false)
+        assert(ns.db.paths.off == true and ns.PathsEnabled() == false, "turned off: not kept")
+        ns.PathsSetEnabled(true)
+
+        -- taken off the flight path in the middle of a square: the way made in the air does not count
+        row = row + 2
+        W.Start(100, row)
+        local before = W.Total()
+        UnitOnTaxi = function() return true end
+        W.Go(1, 0, 20)
+        UnitOnTaxi = function() return false end
+        W.Go(1, 0, 60)
+        local count, cost = W.Piece(101, row, 1, 0)
+        assert(count == 1 and cost <= 1.15, ("the square after landing: count %s, cost %s"):format(tostring(count), tostring(cost)))
+
+        -- a teleport: far away in one look - no piece between the two places, both learn on
+        row = row + 2
+        W.Start(100, row)
+        before = W.Total()
+        W.Go(1, 0, 7)
+        W.Step(40 * 25, 0)
+        assert(W.Total() == before, "a teleport made a piece")
+        W.Go(1, 0, 60)
+        assert(W.Total() == before + 2 and W.Piece(141, row, 1, 0) == 1, "after a teleport nothing is learned at the new place")
+        -- two squares in one look (a hitch): no piece either, not a made-up one
+        row = row + 2
+        W.Start(100, row)
+        before = W.Total()
+        W.Go(1, 0, 7)
+        W.Step(50, 0)
+        assert(W.Total() == before, "two squares in one look made a piece")
+
+        -- a loading screen in between: the way made before it does not count for the square after it
+        row = row + 2
+        W.Start(100, row)
+        before = W.Total()
+        W.Go(1, 0, 10.5) -- 23 yards into the square, 2 from its edge
+        fire("PLAYER_ENTERING_WORLD")
+        W.Step(3.5, 0)   -- seen again in the next square
+        assert(W.Total() == before, "across a loading screen a piece was learned")
+
+        -- another zone: no piece from one zone into the other
+        row = row + 2
+        W.Start(100, row)
+        before = W.Total()
+        W.Go(1, 0, 7)
+        player.map = 1411
+        W.Step(3.5, 0)
+        W.Go(1, 0, 60)
+        player.map = 1412
+        local _, zones = ns.PathsCount()
+        assert(zones == 2 and ns.PathsPiece(1411, 101, row, 1, 0) == 1, "the other zone's pieces are not kept under that zone")
+        assert(W.Piece(100, row, 1, 0) == nil, "a piece from one zone into the other")
+    end)
+    W.Done()
+    if not ok then error(err, 0) end
+end)
+
+step("Paths: a look costs the same however much is known, at most two a second (v0.1.22 W5)", function()
+    local W = PathsWorld()
+    local keepTime = GetTime
+    local ok, err = pcall(function()
+        -- the ticker: looks happen twice a second and not more often
+        W.Start(100, 100)
+        local looks, realSpeed = 0, GetUnitSpeed
+        GetUnitSpeed = function() looks = looks + 1 return 7 end
+        advance(60)
+        GetUnitSpeed = realSpeed
+        assert(looks >= 118 and looks <= 121, looks .. " looks in a minute, want 120")
+        -- 24,000 looks along a zigzag through the zone, on a clock of our own (no other timer runs)
+        W.speed = 20 -- (10 yards a look, as the zigzag below moves)
+        local clock = GetTime()
+        GetTime = function() return clock end
+        local function Batch(count, row0)
+            local x, y, dir = 300, row0 * 25 + 12.5, 1
+            local t0 = os.clock()
+            for _ = 1, count do
+                x = x + dir * 10
+                if x > 4700 or x < 300 then dir, y = -dir, y + 25 end
+                W.At(x, y)
+                clock = clock + 0.5
+                ns.PathsLook()
+            end
+            return (os.clock() - t0) / count * 1e6
+        end
+        local first = Batch(8000, 2)
+        local known = W.Total()
+        Batch(8000, 22)
+        local last = Batch(8000, 42)
+        note(("paths: %.1f us a look with %d pieces known, %.1f us with %d"):format(first, known, last, W.Total()))
+        assert(W.Total() > 3 * known * 0.9 and known > 2000, "test setup: the looks did not learn pieces (" .. known .. ", " .. W.Total() .. ")")
+        assert(last < first * 3 + 20, ("a look took %.1f us with few pieces known and %.1f us with many"):format(first, last))
+    end)
+    GetTime = keepTime
+    W.Done()
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
