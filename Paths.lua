@@ -29,6 +29,9 @@ local HBD = LibStub and LibStub("HereBeDragons-2.0", true)
 local TILE = 25           -- yards: the side of a square (W1)
 local TICK = 0.5          -- seconds between two looks (W5: never more than two a second)
 local GRID = 1024         -- squares per row in a key (a zone up to 25,600 yards wide)
+local MAX_TOTAL = 30000   -- path pieces kept in all zones together (W4)
+local MAX_ZONE = 8000     -- ... and in one zone
+local PRUNE_SHARE = 0.1   -- at a limit this share goes, the longest unused first
 local COUNT_MAX = 255     -- counts stop here (8 bits)
 local COST_MAX = 1023     -- cost in hundredths stops here (10 bits: 10.23)
 local MIN_WAY = 0.5       -- a crossing counts when you made at least this share of the straight line yourself
@@ -84,6 +87,71 @@ local function Today()
     return max(0, min(16383, floor(time() / 86400) - DAY0))
 end
 
+-- A limit is reached: the pieces not used for the longest go first, about
+-- a tenth of them (so this runs once in a few thousand new pieces, not at
+-- every one). Within the last day that has to give, the rarely used first.
+local function Prune(p, onlyZone)
+    local days, total = {}, 0
+    for mapID, z in pairs(p.zones) do
+        if not onlyZone or mapID == onlyZone then
+            for _, v in pairs(z.e) do
+                local day = v % 16384
+                days[day] = (days[day] or 0) + 1
+                total = total + 1
+            end
+        end
+    end
+    local need = max(1, floor(total * PRUNE_SHARE + 0.5))
+    local order = {}
+    for day in pairs(days) do order[#order + 1] = day end
+    table.sort(order)
+    local cut, fromCut = order[1], need -- every day before `cut` goes, and `fromCut` pieces of that day
+    for _, day in ipairs(order) do
+        cut = day
+        if days[day] >= fromCut then break end
+        fromCut = fromCut - days[day]
+    end
+    -- of the day that is cut in part: the least used first
+    local limit, counts = COUNT_MAX, {}
+    if fromCut < days[cut] then
+        for mapID, z in pairs(p.zones) do
+            if not onlyZone or mapID == onlyZone then
+                for _, v in pairs(z.e) do
+                    if v % 16384 == cut then
+                        local c = ((v - cut) / 16384) % 256
+                        counts[c] = (counts[c] or 0) + 1
+                    end
+                end
+            end
+        end
+        local left = fromCut
+        for c = 0, COUNT_MAX do
+            limit = c
+            left = left - (counts[c] or 0)
+            if left <= 0 then break end
+        end
+    end
+    local removed = 0
+    for mapID, z in pairs(p.zones) do
+        if not onlyZone or mapID == onlyZone then
+            local gone = {}
+            for key, v in pairs(z.e) do
+                local day = v % 16384
+                if day < cut or (day == cut and fromCut > 0 and ((v - day) / 16384) % 256 <= limit) then
+                    gone[#gone + 1] = key
+                    if day == cut then fromCut = fromCut - 1 end
+                end
+            end
+            for _, key in ipairs(gone) do z.e[key] = nil end
+            z.n = z.n - #gone
+            removed = removed + #gone
+            if z.n <= 0 then p.zones[mapID] = nil end
+        end
+    end
+    p.total = max(0, p.total - removed)
+    return removed
+end
+
 -- One crossing: from square (tx, ty) of the zone into its neighbour (dx, dy)
 local function Record(p, mapID, tx, ty, dx, dy, cost, fell, swam)
     local z = p.zones[mapID]
@@ -105,6 +173,22 @@ local function Record(p, mapID, tx, ty, dx, dy, cost, fell, swam)
         mean = floor(mean + (hundredths - mean) / count + 0.5)
         z.e[key] = Pack(count, max(100, min(COST_MAX, mean)), falls, swims, Today())
         return
+    end
+    if z.n >= MAX_ZONE then
+        Prune(p, mapID)
+        z = p.zones[mapID]
+        if not z then
+            z = { n = 0, e = {} }
+            p.zones[mapID] = z
+        end
+    end
+    if p.total >= MAX_TOTAL then
+        Prune(p)
+        z = p.zones[mapID]
+        if not z then
+            z = { n = 0, e = {} }
+            p.zones[mapID] = z
+        end
     end
     z.e[key] = Pack(1, hundredths, fell and 1 or 0, swam and 1 or 0, Today())
     z.n = z.n + 1
@@ -240,6 +324,7 @@ ns.PathsLook = Look
 ns.PathsEnabled = Enabled
 ns.PathsSetEnabled = SetEnabled
 ns.PathsCount = Count
+ns.PathsLimits = function() return MAX_TOTAL, MAX_ZONE, TILE end
 -- What is known about the crossing from square (tx, ty) into its neighbour
 -- (dx, dy): count, cost (1 = straight), falls, swims, days since 2026-01-01
 ns.PathsPiece = function(mapID, tx, ty, dx, dy)

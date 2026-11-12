@@ -9141,7 +9141,7 @@ step("Paths: a look costs the same however much is known, at most two a second (
         advance(60)
         GetUnitSpeed = realSpeed
         assert(looks >= 118 and looks <= 121, looks .. " looks in a minute, want 120")
-        -- 24,000 looks along a zigzag through the zone, on a clock of our own (no other timer runs)
+        -- 16,000 looks along a zigzag through two zones, on a clock of our own (no other timer runs)
         W.speed = 20 -- (10 yards a look, as the zigzag below moves)
         local clock = GetTime()
         GetTime = function() return clock end
@@ -9159,13 +9159,163 @@ step("Paths: a look costs the same however much is known, at most two a second (
         end
         local first = Batch(8000, 2)
         local known = W.Total()
-        Batch(8000, 22)
-        local last = Batch(8000, 42)
+        player.map = 1411
+        local last = Batch(8000, 2)
+        player.map = 1412
         note(("paths: %.1f us a look with %d pieces known, %.1f us with %d"):format(first, known, last, W.Total()))
-        assert(W.Total() > 3 * known * 0.9 and known > 2000, "test setup: the looks did not learn pieces (" .. known .. ", " .. W.Total() .. ")")
+        assert(W.Total() > 2 * known * 0.9 and known > 2000, "test setup: the looks did not learn pieces (" .. known .. ", " .. W.Total() .. ")")
         assert(last < first * 3 + 20, ("a look took %.1f us with few pieces known and %.1f us with many"):format(first, last))
     end)
     GetTime = keepTime
+    W.Done()
+    if not ok then error(err, 0) end
+end)
+step("Paths: at most 30,000 pieces, 8,000 a zone - the longest unused go first; the size of the saved data (v0.1.22 W4)", function()
+    local W = PathsWorld()
+    local keepTime, keepClock = time, GetTime
+    local HBD = LibStub("HereBeDragons-2.0")
+    local ok, err = pcall(function()
+        local maxTotal, maxZone, tile = ns.PathsLimits()
+        assert(maxTotal == 30000 and maxZone == 8000 and tile == 25, ("limits %s / %s, squares of %s"):format(tostring(maxTotal), tostring(maxZone), tostring(tile)))
+        -- four zones with a size, a calendar and a clock of our own
+        HBD.GetZoneSize = function(_, mapID) if mapID >= 1411 and mapID <= 1414 then return W.w, W.h end return 0, 0 end
+        local day = 0
+        time = function() return (20454 + 100 + day) * 86400 + 4000 end
+        local clock = GetTime()
+        GetTime = function() return clock end
+        W.speed = 25 -- 12.5 yards a look: every second look crosses into the next square
+        local function Pieces(mapID) local z = ns.db.paths.zones[mapID] return z and z.n or 0 end
+        local function Look(x, y)
+            W.At(x, y)
+            clock = clock + 0.5
+            ns.PathsLook()
+        end
+        -- rides east along row after row of the zone until `add` new pieces are made; returns the next free row
+        local function Fill(mapID, row, add)
+            player.map = mapID
+            local made = 0
+            while made < add do
+                clock = clock + 10 -- (a new start)
+                local y = row * 25 + 12.5
+                Look(300, y)
+                local x = 300
+                while x < 4700 and made < add do
+                    x = x + 12.5
+                    local before = ns.PathsPiece(mapID, math.floor(x / 25) - 1, row, 1, 0)
+                    Look(x, y)
+                    if not before and ns.PathsPiece(mapID, math.floor(x / 25) - 1, row, 1, 0) then made = made + 1 end
+                end
+                row = row + 1
+            end
+            return row
+        end
+        -- rides the first `count` squares of a row again
+        local function Again(mapID, row, count)
+            player.map = mapID
+            clock = clock + 10
+            local y = row * 25 + 12.5
+            Look(300, y)
+            for i = 1, count * 2 do Look(300 + i * 12.5, y) end
+        end
+        local function ByDay(mapID)
+            local days = {}
+            for _, v in pairs(ns.db.paths.zones[mapID].e) do
+                local d = v % 16384
+                days[d] = (days[d] or 0) + 1
+            end
+            return days
+        end
+
+        -- one zone: 4000 pieces on the first day, 100 of them ridden twice; 4000 on the second
+        day = 1
+        local row = Fill(1412, 0, 4000)
+        Again(1412, 0, 100)
+        day = 2
+        row = Fill(1412, row, 4000)
+        assert(Pieces(1412) == 8000 and ns.PathsCount() == 8000, "test setup: 8000 pieces in the zone")
+        -- the third day: 50 old pieces are used again, then one new piece is one too many
+        day = 3
+        Again(1412, 1, 50)
+        assert(Pieces(1412) == 8000, "riding known pieces again made new ones")
+        Fill(1412, row, 1)
+        local days = ByDay(1412)
+        local d1, d2, d3 = days[101] or 0, days[102] or 0, days[103] or 0
+        assert(Pieces(1412) == 7201 and d1 + d2 + d3 == 7201, ("after the 8001st piece the zone holds %d, want 7201 (a tenth gone)"):format(Pieces(1412)))
+        assert(d2 == 4000 and d3 == 51, ("gone from the newer days: day 2 holds %d of 4000, day 3 %d of 51"):format(d2, d3))
+        assert(d1 == 3150, ("day 1 holds %d, want 3150 (4000 less the 50 used again and the 800 that went)"):format(d1))
+        -- of the oldest day the rarely used went first: the 100 ridden twice are all there
+        local twice = 0
+        for tx = 12, 111 do
+            local count = ns.PathsPiece(1412, tx, 0, 1, 0)
+            if count == 2 then twice = twice + 1 end
+        end
+        assert(twice == 100, "of the pieces ridden twice on the oldest day " .. twice .. " of 100 are left")
+        assert(ns.PathsCount() == 7201, "the total does not follow the zone: " .. ns.PathsCount())
+
+        -- all zones together: three more zones, 30,000 in all, the oldest a small zone of its own
+        ns.db.paths = nil
+        day = 1
+        Fill(1414, 0, 40)
+        day = 2
+        Fill(1411, 0, 7960)
+        Fill(1412, 0, 8000)
+        day = 3
+        Fill(1413, 0, 8000)
+        Fill(1411, 60, 40) -- (rows the zone has not seen yet)
+        local row14 = Fill(1414, 10, 5960)
+        local total, zones = ns.PathsCount()
+        assert(total == 30000 and zones == 4, ("test setup: %d pieces in %d zones"):format(total, zones))
+        local t0 = os.clock()
+        Fill(1414, row14, 1)
+        local took = (os.clock() - t0) * 1000
+        total, zones = ns.PathsCount()
+        assert(total == 27001, "after the 30,001st piece " .. total .. " are kept, want 27,001 (a tenth gone)")
+        -- the 40 of day 1 went, the rest from day 2; nothing of day 3
+        local left = { [101] = 0, [102] = 0, [103] = 0 }
+        local sum = 0
+        for mapID, z in pairs(ns.db.paths.zones) do
+            local n = 0
+            for d, c in pairs(ByDay(mapID)) do left[d] = (left[d] or 0) + c n = n + c end
+            assert(n == z.n, "zone " .. mapID .. " counts " .. z.n .. " and holds " .. n)
+            sum = sum + n
+        end
+        assert(sum == 27001 and left[101] == 0 and left[102] == 15960 - 2960 and left[103] == 14001,
+            ("left by day: %d / %d / %d, want 0 / 13000 / 14001"):format(left[101], left[102], left[103]))
+        note(("paths: making room at the limit took %.1f ms"):format(took))
+        assert(took < 500, ("making room took %.0f ms"):format(took))
+
+        -- a zone whose pieces all went is gone itself
+        ns.db.paths = nil
+        day = 1
+        Fill(1414, 0, 30)
+        day = 2
+        Fill(1412, 0, 8000) Fill(1411, 0, 8000) Fill(1413, 0, 8000)
+        player.map = 1414
+        day = 3
+        local need = 30000 - ns.PathsCount()
+        assert(need == 5970, "test setup: " .. need .. " pieces to the limit")
+        -- fill up with pieces of day 3 in a zone that has room, then one more
+        HBD.GetZoneSize = function(_, mapID) if mapID >= 1411 and mapID <= 1415 then return W.w, W.h end return 0, 0 end
+        Fill(1415, 0, 5971)
+        total, zones = ns.PathsCount()
+        assert(total == 27001 and zones == 4 and ns.db.paths.zones[1414] == nil, ("%d pieces in %d zones; the emptied zone is %s"):format(total, zones, ns.db.paths.zones[1414] and "still there" or "gone"))
+
+        -- the saved data at the limit, written the way the game writes it
+        ns.db.paths = nil
+        day = 1
+        Fill(1411, 0, 8000) Fill(1412, 0, 8000) Fill(1413, 0, 8000) Fill(1414, 0, 6000)
+        assert(ns.PathsCount() == 30000, "test setup: the limit")
+        local bytes = 0
+        for mapID, z in pairs(ns.db.paths.zones) do
+            bytes = bytes + #(("\t\t\t[%d] = {\n\t\t\t\t[\"n\"] = %d,\n\t\t\t\t[\"e\"] = {\n\t\t\t\t},\n\t\t\t},\n"):format(mapID, z.n))
+            for key, value in pairs(z.e) do
+                bytes = bytes + #(("\t\t\t\t\t[%d] = %.0f,\n"):format(key, value))
+            end
+        end
+        note(("paths: 30000 pieces are %.0f KB in the saved file, %.1f bytes a piece"):format(bytes / 1024, bytes / 30000))
+        assert(bytes < 1024 * 1024, ("the saved paths are %.0f KB at the limit, want under 1 MB"):format(bytes / 1024))
+    end)
+    time, GetTime = keepTime, keepClock
     W.Done()
     if not ok then error(err, 0) end
 end)
