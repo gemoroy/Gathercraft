@@ -3,7 +3,7 @@
 -- Network simulation for Gathercraft's node sharing: loads the addon once per
 -- simulated player (each in its own environment), connects them through a fake
 -- chat server and lets them gather, share and query like real players.
--- Scenarios: fuzz, normal, attack, launch, mega, all (default)
+-- Scenarios: fuzz, normal, attack, launch, mega, answers, all (default)
 local ROOT = arg[1] or "."
 local ONLY = arg[2] or "all"
 local unpack = unpack or table.unpack
@@ -113,6 +113,10 @@ local function serverSend(from, prefix, msg, dist)
         end
     elseif dist == "CHANNEL" and msg:sub(1, 2) == "Q:" then
         net.queries = (net.queries or 0) + 1
+    end
+    if net.log and dist == "CHANNEL" then
+        local _, count = msg:gsub(";", ";")
+        net.log[#net.log + 1] = { at = NOW, from = from.name, kind = msg:sub(1, 1), nodes = count }
     end
     local ps = net.perSender[from.name] or { times = {} }
     net.perSender[from.name] = ps
@@ -658,7 +662,92 @@ scenarios.fuzz = function()
     Report("Fuzz (" .. #samples .. " broken messages)", 120)
 end
 
-local order = { "fuzz", "normal", "attack", "launch", "mega", "mega3k" }
+-- One question, many who could answer (v0.1.22 S; Sven's debug logs of
+-- 11. and 12.11.2026: 6-7 players answered one question, and one sent 150
+-- nodes to somebody who knew 151). `knowers` players stand in the zone and
+-- know a share of its `world` new nodes; nobody gathers. Then one player
+-- who knows `asked` of them logs in and asks. Counted for two minutes: who
+-- answers, with how many messages and nodes, and what the asker takes.
+--   GC_ANSWERS="knowers,world,share from,share to,asked" changes the case.
+local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed)
+    Reset()
+    math.randomseed(seed)
+    MakeFreshNodes(world)
+    for i, s in ipairs(freshNodes) do s.id = 7000000 + i end -- (each its own object: none merges with another)
+    local function Teach(c, share)
+        local list = c.ns.db.nodes[ZONE] or {}
+        c.ns.db.nodes[ZONE] = list
+        local k = 0
+        for _, s in ipairs(freshNodes) do
+            if math.random() < share then
+                k = k + 1
+                list[#list + 1] = { id = "o" .. s.id, type = s.type, x = s.x, y = s.y, name = s.name, item = s.item, count = math.random(1, 9) }
+            end
+        end
+        c.ns.NotifyNodesChanged()
+        return k
+    end
+    for i = 1, knowers do
+        local c = NewClient("K" .. i, nil)
+        clients[#clients + 1] = c
+        hpush({ at = NOW + math.random() * 60, fn = function() Login(c) end })
+    end
+    -- their own questions at login are over and forgotten
+    runUntil(NOW + 20 * 60)
+    local knownMin, knownMax = math.huge, 0
+    for _, c in ipairs(clients) do
+        local k = Teach(c, shareFrom + math.random() * (shareTo - shareFrom))
+        knownMin, knownMax = math.min(knownMin, k), math.max(knownMax, k)
+    end
+    net = { channel = 0, guild = 0, bySecond = {}, perSender = {}, bytes = 0, log = {} }
+    local asker = NewClient("Asker", nil)
+    clients[#clients + 1] = asker
+    local start = NOW
+    Login(asker)
+    local before = 0
+    if asked > 0 then
+        -- the first `asked` nodes of the world: what the others know too
+        local list = asker.ns.db.nodes[ZONE] or {}
+        asker.ns.db.nodes[ZONE] = list
+        for i = 1, math.min(asked, #freshNodes) do
+            local s = freshNodes[i]
+            list[#list + 1] = { id = "o" .. s.id, type = s.type, x = s.x, y = s.y, name = s.name, item = s.item, count = 1 }
+        end
+        asker.ns.NotifyNodesChanged()
+    end
+    for _, s in ipairs(freshNodes) do if Knows(asker, s) then before = before + 1 end end
+    runUntil(NOW + 120)
+    local senders, messages, nodes, last, queries = {}, 0, 0, 0, 0
+    for _, m in ipairs(net.log) do
+        if m.kind == "Q" then queries = queries + 1 end
+        if m.kind == "N" and m.from ~= "Asker" then
+            if not senders[m.from] then senders[m.from] = true senders[#senders + 1] = m.from end
+            messages, nodes, last = messages + 1, nodes + m.nodes, math.max(last, m.at - start)
+        end
+    end
+    local now = 0
+    for _, s in ipairs(freshNodes) do if Knows(asker, s) then now = now + 1 end end
+    print(("\n=== %s ==="):format(title))
+    print(("  %d players know %d-%d of the zone's %d new nodes; the asker knew %d and asked %d time(s)"):format(knowers, knownMin, knownMax, world, before, queries))
+    print(("  Answering players: %d   their messages: %d   nodes sent: %d   last message after %.0f s"):format(#senders, messages, nodes, last))
+    print(("  The asker knows %d now (%d new); %d of the nodes sent were of no use to him"):format(now, now - before, nodes - (now - before)))
+    return { answering = #senders, messages = messages, nodes = nodes, gained = now - before }
+end
+
+scenarios.answers = function()
+    local custom = os.getenv("GC_ANSWERS")
+    if custom then
+        local k, w, a, b, q = custom:match("^(%d+),(%d+),([%d.]+),([%d.]+),(%d+)$")
+        AnswerCase("One question (custom)", tonumber(k), tonumber(w), tonumber(a), tonumber(b), tonumber(q), 11)
+        return
+    end
+    AnswerCase("One question, 40 who know more, the asker knows nothing", 40, 120, 0.5, 1, 0, 11)
+    AnswerCase("One question, 40 who know more, the asker knows 151 of 300", 40, 300, 0.5, 1, 151, 12)
+    AnswerCase("One question, 40 who know a little more than the asker (100 of 120)", 40, 120, 0.85, 1, 100, 13)
+    AnswerCase("One question, 8 who know more, the asker knows nothing", 8, 120, 0.5, 1, 0, 14)
+end
+
+local order = { "fuzz", "normal", "attack", "launch", "mega", "mega3k", "answers" }
 for _, name in ipairs(order) do
     if (ONLY == "all" and name ~= "mega3k") or ONLY == name then
         local t0 = os.clock()
