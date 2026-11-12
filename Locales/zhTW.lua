@@ -579,4 +579,5 @@ ns.Locales.zhTW = {
     ["This deletes the %d recorded path pieces and nothing else. To do it: /gcr paths clear yes"] = "這只會刪除已記錄的 %d 段路徑，不影響其他內容。要執行請輸入：/gcr paths clear yes",
     ["New: Gathercraft notes which ways you ride, as small pieces per map square - only on this computer, nothing is sent. Later routes can go around obstacles with it. Switch: Options, %s. What it holds: /gcr paths"] = "新功能：Gathercraft 會按地圖方格以小段的形式記下你走過的路——僅儲存在這台電腦上，不會傳送任何內容。之後路線可以藉此繞開障礙。開關：選項，%s。查看已儲存內容：/gcr paths",
     ["  /gcr paths        - the ways you ride, noted on this computer"] = "  /gcr paths        - 你走過的路徑，記錄在這台電腦上",
+    ["Sharing is quieter: Gathercraft answers a question about a zone only when it knows clearly more, and stops when three others answered first. New: it notes which ways you ride - only on this computer, nothing is sent; routes will use it later (Options, Sharing: Record the paths I ride; /gcr paths)."] = "共享更安靜了：只有在明顯知道得更多時，Gathercraft 才會回答關於某個區域的詢問；如果已有另外三人先回答，它就會停止。新功能：它會記下你走過的路——僅儲存在這台電腦上，不會傳送任何內容；之後路線會用到它（選項，共享：記錄我走過的路徑；/gcr paths）。",
 }
