@@ -8799,6 +8799,54 @@ step("/gcr perf: one line with the sync load of the last full minute and the mem
     advance(120)
     if not ok then error(err, 0) end
 end)
+step("Sharing: turning the chat line off also drops a line that was already on its way (v0.1.22 S4)", function()
+    -- Codex, 12.11.2026, round 3 on 0.1.21 (R3-N1): the line is said 20 s after
+    -- the first spot (or 3 min after the last line), and the timer did not ask
+    -- again - so one more line came after the box was unticked.
+    local db = ns.db.sync
+    local saved = { on = db.announceOn, off = db.announceOff, enabled = db.enabled }
+    slash("sync on")
+    local zone = ns.GetZoneName(1412)
+    local function Lines(count)
+        local n, text = 0, (ns.L["%d spots shared by other players added (%s)."]):format(count, zone)
+        for _, l in ipairs(log) do if l:find(text, 1, true) then n = n + 1 end end
+        return n
+    end
+    local function Any()
+        local n = 0
+        for k = 1, 9 do n = n + Lines(k) end
+        return n
+    end
+    local spot = 0
+    local function Arrive() -- a new spot from the guild, another place each time
+        spot = spot + 1
+        local before = select(2, ns.SyncSummary())
+        fire("CHAT_MSG_ADDON", "Gathercraft", ("N:1412;o1621,h,%d,%d,2450"):format(2100 + spot * 43, 8300 + spot * 31), "GUILD", "Guildie Ten")
+        assert(select(2, ns.SyncSummary()) > before, "test setup: the spot was not taken")
+    end
+    local ok, err = pcall(function()
+        advance(400) -- whatever an earlier step left: said and over
+        db.announceOn, db.announceOff = true, nil
+        local n0 = Any()
+        Arrive() Arrive()
+        advance(5)
+        -- turned off while the line waits (the options do exactly this)
+        db.announceOn = nil
+        advance(400)
+        assert(Any() == n0, "the line came although it was turned off before its time")
+        -- turned on again: what arrived before is not said late
+        db.announceOn = true
+        advance(400)
+        assert(Any() == n0, "turning the line on said something old")
+        local one = Lines(1)
+        Arrive()
+        advance(25)
+        assert(Lines(1) == one + 1 and Any() == n0 + 1, "after turning it on again the next spot is said as one spot, once")
+    end)
+    db.announceOn, db.announceOff, db.enabled = saved.on, saved.off, saved.enabled
+    advance(400)
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,

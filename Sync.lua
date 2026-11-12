@@ -422,7 +422,14 @@ local function AnnounceImport(mapID)
     announce.pending = true
     local wait = math.max(ANNOUNCE_DELAY, announce.lastAt + ANNOUNCE_GAP - time())
     C_Timer.After(wait, function()
-        announce.pending, announce.lastAt = false, time()
+        announce.pending = false
+        -- turned off while the line waited: it is dropped, and what was
+        -- counted for it is not said late (v0.1.22 S4; Codex, 12.11.2026, R3-N1)
+        if DB().announceOn ~= true then
+            announce.zones, announce.total = {}, 0
+            return
+        end
+        announce.lastAt = time()
         local names = {}
         for zone in pairs(announce.zones) do
             names[#names + 1] = ns.GetZoneName and ns.GetZoneName(zone) or tostring(zone)
