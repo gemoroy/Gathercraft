@@ -8710,6 +8710,95 @@ step("Sharing: an answer stops when three others answered first, also in the mid
     if not saved then slash("sync off") end
     if not ok then error(err, 0) end
 end)
+step("/gcr perf: one line with the sync load of the last full minute and the memory (v0.1.22 S3)", function()
+    -- Sven, 12.11.2026: the channel is full all the time, receivers refuse a
+    -- lot ("rate limit hit"), Gathercraft shows 8-11 % of the addon time and
+    -- 56-58 MB - and nothing in the game says how much of that is sharing.
+    -- /gcr perf only reads: messages in and out, nodes read, what was
+    -- refused, the time in the sync code, the addon's memory. One line.
+    local db = ns.db.sync
+    local saved = { enabled = db.enabled, pending = db.pending, counts = db.counts, update = UpdateAddOnMemoryUsage, get = GetAddOnMemoryUsage }
+    db.pending, db.counts = {}, nil
+    slash("sync on")
+    advance(700)
+    local function msg(text, who, prefix) fire("CHAT_MSG_ADDON", prefix or "Gathercraft", text, "CHANNEL", who, nil, nil, nil, "GathercraftSync") end
+    local function nodes(count, seed)
+        local parts = {}
+        for k = 1, count do parts[k] = ("o96%d,h,%d,%d,2447"):format(1000 + seed * 10 + k, 1000 + (seed * 10 + k) * 7, 2000 + (seed * 10 + k) * 5) end
+        return "N:1412;" .. table.concat(parts, ";")
+    end
+    -- the line /gcr perf printed, and that it was the only one
+    local function Perf()
+        local mark = #log
+        slash("perf")
+        local lines = {}
+        for i = mark + 1, #log do if log[i]:find("^PRINT") then lines[#lines + 1] = log[i] end end
+        assert(#lines == 1, "/gcr perf printed " .. #lines .. " lines, want 1")
+        return lines[1]
+    end
+    local function Number(line, pattern)
+        local v = line:match(pattern)
+        assert(v, "not in the line (" .. pattern .. "): " .. line)
+        return tonumber(v)
+    end
+    local ok, err = pcall(function()
+        UpdateAddOnMemoryUsage, GetAddOnMemoryUsage = nil, nil
+        -- to the start of a minute, then one minute of known traffic
+        advance(60 - GetTime() % 60 + 1)
+        local sentBefore = #sentMessages
+        for k = 1, 5 do msg(nodes(3, k), "Stranger" .. k .. "-Realm") end              -- 5 messages, 15 nodes
+        msg("Q:1412:999", "Asker-Realm")                                               -- 1 question (nothing to answer)
+        for k = 1, 20 do msg(nodes(8, 10 + k), "Flood-Realm") end                      -- 20 messages: 144 nodes read, 16 over the limit per player
+        for k = 1, 3 do msg("whatever", "Other" .. k .. "-Realm", "SomeOtherAddon") end -- not ours
+        advance(2)
+        for k = 1, 45 do msg(nodes(1, 100 + k), "Crowd" .. k .. "-Realm") end          -- one second: 40 read, 5 over the budget
+        local node = { id = "o1619", name = "Silverleaf", type = "herb", x = 0.35, y = 0.64, count = 1, last = time() }
+        table.insert(ns.db.nodes[1412], node)
+        ns.SyncShare(1412, node)
+        advance(10)
+        for i, n in ipairs(ns.db.nodes[1412]) do if n == node then table.remove(ns.db.nodes[1412], i) break end end
+        local sent = #sentMessages - sentBefore
+        assert(sent > 0, "the harvest was not sent")
+        advance(60 - GetTime() % 60 + 1)
+        local line = Perf()
+        assert(line:find("last full minute", 1, true), "no full minute named: " .. line)
+        assert(Number(line, "sync messages in (%d+)") == 71, "messages in: " .. line)
+        assert(Number(line, "out (%d+)") == sent, "messages out, want " .. sent .. ": " .. line)
+        assert(Number(line, "nodes read (%d+)") == 15 + 144 + 40, "nodes read, want 199: " .. line)
+        assert(Number(line, "(%d+) messages over the budget") == 5, "over the budget: " .. line)
+        assert(Number(line, "(%d+) nodes over the limit per player") == 16, "over the limit: " .. line)
+        assert(Number(line, "other addons' messages (%d+)") == 3, "other addons: " .. line)
+        assert(Number(line, "sync code ([%d.]+) ms") >= 0, "time: " .. line)
+        assert(line:find("memory not readable in this client", 1, true), "no memory functions, and the line does not say so: " .. line)
+        -- it only reads: asked again, the same numbers
+        assert(Perf() == line, "asking twice changed the line")
+        -- the memory, where the client tells it (asked for once per command)
+        local updates = 0
+        UpdateAddOnMemoryUsage = function() updates = updates + 1 end
+        GetAddOnMemoryUsage = function(name) assert(name == "Gathercraft", "memory asked for " .. tostring(name)) return 57344 end
+        line = Perf()
+        assert(line:find("memory 56.0 MB", 1, true) and updates == 1, "memory (" .. updates .. " updates): " .. line)
+        -- a client whose function fails: no error, said plainly
+        GetAddOnMemoryUsage = function() error("blocked") end
+        local before = #errors
+        line = Perf()
+        assert(#errors == before and line:find("memory not readable in this client", 1, true), "a failing memory function: " .. line)
+        -- a quiet minute is a full minute of zeros, not the busy one again
+        advance(125)
+        line = Perf()
+        assert(Number(line, "sync messages in (%d+)") == 0 and Number(line, "nodes read (%d+)") == 0, "two quiet minutes later: " .. line)
+        -- the help names the command
+        local mark, named = #log, false
+        slash("help")
+        for i = mark + 1, #log do if log[i]:find("/gcr perf", 1, true) then named = true end end
+        assert(named, "/gcr help does not name /gcr perf")
+    end)
+    UpdateAddOnMemoryUsage, GetAddOnMemoryUsage = saved.update, saved.get
+    db.pending, db.counts = saved.pending, saved.counts
+    if not saved.enabled then slash("sync off") end
+    advance(120)
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,

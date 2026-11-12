@@ -1378,6 +1378,7 @@ local function Help()
     print(L["  /gcr rare         - test the rare alert"])
     print(L["  /gcr debug        - toggle debug output"])
     print("  /gcr test         - API check")
+    print("  /gcr perf         - sync load of the last minute and the addon's memory")
     print(L["  /gcr scan         - scan auction house prices (at the auction house)"])
     print(L["  /gcr ahtest       - price sources and auction house check"])
 end
@@ -1448,6 +1449,8 @@ SlashCmdList.GATHERCRAFT = function(msg)
         if ns.SyncCommand then
             ns.SyncCommand(rest)
         end
+    elseif cmd == "perf" then
+        if ns.SyncPerf then ns.SyncPerf() end
     elseif cmd == "loadall" then
         if ns.LoadQuestieContinent then ns.LoadQuestieContinent() end
     elseif cmd == "rare" then

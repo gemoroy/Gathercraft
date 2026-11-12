@@ -92,6 +92,59 @@ local function Debug(text)
 end
 
 ---------------------------------------------------------------------------
+-- /gcr perf (v0.1.22 S3): what sharing cost in the last full minute.
+--   Sven, 12.11.2026: the channel is full, receivers refuse a lot, and
+--   nothing in the game said how much of the addon's time and memory is
+--   sharing. Counted per minute: messages in and out, nodes read, what was
+--   refused (the budget per second, the limit per player), messages of
+--   other addons that pass our handler, and the time in the sync code
+--   (receiving and sending). The command only reads.
+---------------------------------------------------------------------------
+local perf = {} -- cur = the running minute, last = the one before it (nil in the first minute after login)
+
+local function PerfNow()
+    local minute = math.floor(GetTime() / 60)
+    local cur = perf.cur
+    if not cur or cur.minute ~= minute then
+        if cur then
+            -- (minutes nothing happened in are full minutes of zeros)
+            perf.last = cur.minute == minute - 1 and cur or { minute = minute - 1, msgIn = 0, msgOut = 0, other = 0, nodes = 0, overBudget = 0, overLimit = 0, ms = 0 }
+        end
+        cur = { minute = minute, msgIn = 0, msgOut = 0, other = 0, nodes = 0, overBudget = 0, overLimit = 0, ms = 0 }
+        perf.cur = cur
+    end
+    return cur
+end
+
+local function PerfTime(t0)
+    local cur = PerfNow()
+    cur.ms = cur.ms + (debugprofilestop() - t0)
+end
+
+-- The addon's memory in KB, where the client tells it (asked for only here,
+-- on the command: the game adds it up for all addons)
+local function PerfMemory()
+    if type(UpdateAddOnMemoryUsage) ~= "function" or type(GetAddOnMemoryUsage) ~= "function" then return end
+    local ok, kb = pcall(function()
+        UpdateAddOnMemoryUsage()
+        return GetAddOnMemoryUsage(ADDON_NAME)
+    end)
+    if ok and type(kb) == "number" and not ns.AnySecret("perf", kb) then return kb end
+end
+
+local function Perf()
+    PerfNow()
+    local b, what = perf.last, "last full minute"
+    if not b then
+        b, what = perf.cur, ("running minute, %d s"):format(GetTime() % 60)
+    end
+    local kb = PerfMemory()
+    ns.Print(("perf (%s): sync messages in %d, out %d; nodes read %d; refused: %d messages over the budget, %d nodes over the limit per player; other addons' messages %d; sync code %.1f ms; %s"):format(
+        what, b.msgIn, b.msgOut, b.nodes, b.overBudget, b.overLimit, b.other, b.ms,
+        kb and ("memory %.1f MB"):format(kb / 1024) or "memory not readable in this client"))
+end
+
+---------------------------------------------------------------------------
 -- Names and trust
 ---------------------------------------------------------------------------
 local playerName
@@ -187,6 +240,8 @@ end
 -- A client that refuses addon messages (e.g. a trial account) may throw
 -- instead of saying no: the message is dropped either way, never retried
 local function Send(...)
+    local cur = PerfNow()
+    cur.msgOut = cur.msgOut + 1
     local fine, result = pcall(C_ChatInfo.SendAddonMessage, ...)
     if fine then return result end
     return false, result
@@ -606,8 +661,16 @@ local function OnNodes(body, sender, trusted, dry)
     local mapID = tonumber(parts[1])
     if not mapID or not C_Map.GetMapInfo(mapID) then return end
     if not RateOK(sender, #parts - 1) then
+        if not dry then
+            local cur = PerfNow()
+            cur.overLimit = cur.overLimit + #parts - 1
+        end
         Debug("rate limit hit by " .. sender)
         return
+    end
+    if not dry then
+        local cur = PerfNow()
+        cur.nodes = cur.nodes + #parts - 1
     end
     -- Someone answers a zone query: we may not need to answer ourselves, or
     -- not to the end (see AnswerStops). A harvest somebody shares is one node
@@ -706,7 +769,15 @@ local function WithinBudget()
 end
 
 local function Receive(prefix, text, distribution, sender, dry)
-    if prefix ~= PREFIX or not DB().enabled then return end
+    if prefix ~= PREFIX then
+        -- (every addon's messages pass this handler)
+        if not dry then
+            local cur = PerfNow()
+            cur.other = cur.other + 1
+        end
+        return
+    end
+    if not DB().enabled then return end
     local msgKind, msgMap = text:match("^(%u):(%d+)")
     msgMap = tonumber(msgMap)
     if not dry then
@@ -715,6 +786,8 @@ local function Receive(prefix, text, distribution, sender, dry)
             AnswerEcho(text)
             return
         end
+        local cur = PerfNow()
+        cur.msgIn = cur.msgIn + 1
         if ns.db.debug then
             local zone = msgMap and ns.GetZoneName and ns.GetZoneName(msgMap)
             Debug(("recv [%s] %s: %s%s"):format(distribution, sender, text:sub(1, 60),
@@ -723,7 +796,13 @@ local function Receive(prefix, text, distribution, sender, dry)
     end
     if DB().blocked[ShortName(sender)] then return end
     if distribution == "CHANNEL" and not DB().public then return end
-    if not WithinBudget() then return end
+    if not WithinBudget() then
+        if not dry then
+            local cur = PerfNow()
+            cur.overBudget = cur.overBudget + 1
+        end
+        return
+    end
 
     if not dry then
         stats.received = stats.received + 1
@@ -998,7 +1077,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
         C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
         -- (one ticker, whatever tells us about the login twice: two would send two
         -- packets of an answer before the first has come back, see AnswerStops)
-        if not sendTicker then sendTicker = C_Timer.NewTicker(SEND_INTERVAL, SendNext) end
+        if not sendTicker then
+            sendTicker = C_Timer.NewTicker(SEND_INTERVAL, function()
+                local t0 = debugprofilestop()
+                SendNext()
+                PerfTime(t0)
+            end)
+        end
         C_Timer.After(JOIN_DELAY, function()
             JoinChannel()
             C_Timer.After(2, CurrentZoneQuery)
@@ -1006,7 +1091,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "CHAT_MSG_ADDON" then
         local prefix, text, distribution, sender = ...
         if ns.AnySecret("CHAT_MSG_ADDON", prefix, text, distribution, sender) then return end
+        local t0 = debugprofilestop()
         Receive(prefix, text, distribution, sender, false)
+        PerfTime(t0)
     elseif event == "ZONE_CHANGED_NEW_AREA" then
         if ns.db and ns.db.sync then
             C_Timer.After(3, CurrentZoneQuery)
@@ -1041,3 +1128,4 @@ ns.SyncPending = function(mapID)
 end
 ns.SyncDisplayName = DisplayName
 ns.SyncCommand = Command
+ns.SyncPerf = Perf
