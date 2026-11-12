@@ -8500,6 +8500,78 @@ step("Sharing: the chat line about spots of other players is off until you turn 
     if not ok then error(err, 0) end
 end)
 -- (end of the v0.1.21 steps)
+-- ---------------------------------------------------------------- v0.1.22, part S: less sync load
+-- Helpers for the steps about answers to a zone question. Each case takes a
+-- zone of its own (an answered zone is not answered again for five minutes).
+local function S22Zone(mapID, count)
+    local list = {}
+    for i = 1, count do
+        list[i] = { id = "o98" .. (1000 + i), name = "X", type = "herb", x = (i % 20) / 20 + 0.01, y = math.floor(i / 20) / 21 + 0.01, count = 1 + i % 7, last = 1, item = 2447 }
+    end
+    ns.db.nodes[mapID] = list
+    ns.NotifyNodesChanged()
+end
+local function S22Msg(text, who) fire("CHAT_MSG_ADDON", "Gathercraft", text, "CHANNEL", who, nil, nil, nil, "GathercraftSync") end
+-- our own messages about the zone since `from`: how many, how many nodes, the first one
+local function S22Sent(mapID, from)
+    local messages, nodes, first = 0, 0, nil
+    for i = from + 1, #sentMessages do
+        if sentMessages[i]:find("^N:" .. mapID .. ";") then
+            local _, k = sentMessages[i]:gsub(";", ";")
+            messages, nodes, first = messages + 1, nodes + k, first or sentMessages[i]
+        end
+    end
+    return messages, nodes, first
+end
+-- another player's answer packet for the zone, with `count` nodes
+local function S22Other(mapID, who, count)
+    local parts = {}
+    for k = 1, count do parts[k] = ("o97%d,h,%d,%d,2447"):format(2000 + k, 1000 + k * 37, 2000 + k * 41) end
+    S22Msg("N:" .. mapID .. ";" .. table.concat(parts, ";"), who)
+end
+
+step("Sharing: a zone question is answered only when the answer adds clearly more (v0.1.22 S1)", function()
+    -- Sven's debug log, 12.11.2026: "answered zone 1420 with 150 nodes (they
+    -- knew 151)". What counts is what is really sent (at most 150 a minute are
+    -- taken from one player) against what the asker knows: at least a fifth
+    -- more, and at least 20 more (for an asker who knows fewer than 20: at
+    -- least as many more as he knows - somebody who knows nothing gets any).
+    local saved = ns.db.sync.enabled
+    slash("sync on")
+    advance(700) -- (nothing of an earlier step is still on its way)
+    local cases = {
+        -- { own nodes, the asker's, nodes expected in the answer }
+        { 100, 100, 0 },   -- as many
+        { 110, 100, 0 },   -- a few more: not worth 14 messages
+        { 119, 100, 0 },
+        { 120, 100, 120 }, -- a fifth more
+        { 400, 151, 0 },   -- 150 would be sent: fewer than he knows
+        { 400, 125, 150 }, -- 150 sent, a fifth more than 125
+        { 400, 126, 0 },
+        { 5, 0, 5 },       -- he knows nothing: everything helps
+        { 15, 10, 0 },
+        { 20, 10, 20 },    -- 10 more than his 10
+        { 39, 20, 0 },
+        { 40, 20, 40 },    -- 20 more
+    }
+    local ok, err = pcall(function()
+        for i, c in ipairs(cases) do
+            local mapID = 1500 + i
+            S22Zone(mapID, c[1])
+            local from = #sentMessages
+            S22Msg(("Q:%d:%d"):format(mapID, c[2]), "Asker" .. i .. "-Realm")
+            advance(60)
+            local _, nodes = S22Sent(mapID, from)
+            assert(nodes == c[3], ("we know %d, the asker %d: %d nodes sent, want %d"):format(c[1], c[2], nodes, c[3]))
+        end
+    end)
+    for i = 1, #cases do ns.db.nodes[1500 + i] = nil end
+    ns.NotifyNodesChanged()
+    if not saved then slash("sync off") end
+    if not ok then error(err, 0) end
+end)
+
+-- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
         cvars = ns.db.fishingCVars, map = player.map, x = player.x, y = player.y }
