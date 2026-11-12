@@ -38,6 +38,7 @@ local MIN_WAY = 0.5       -- a crossing counts when you made at least this share
 local FALL_SECONDS = 1.0  -- in the air this long without a break: a fall (a jump takes about 0.8 s)
 local GAP_MAX = 2         -- seconds between two looks: longer was a hitch or a loading screen
 local DAY0 = 20454        -- the day 2026-01-01, counted from 1970: days are kept from here (14 bits)
+local BYTES_PER_PIECE = 27 -- one path piece in the saved file, about (measured in the smoke test)
 
 local floor, min, max = math.floor, math.min, math.max
 local SQRT2 = math.sqrt(2)
@@ -48,6 +49,7 @@ local function Dir(dx, dy) return (dy + 1) * 3 + (dx + 1) end
 ---------------------------------------------------------------------------
 -- The saved data: ns.db.paths = {
 --     off = true            only when turned off (on by default)
+--     hinted = true         the one-time note was shown
 --     total = n             path pieces in all zones
 --     zones = { [mapID] = { n = pieces, e = { [key] = value } } }
 -- }
@@ -268,7 +270,7 @@ local function Look()
 end
 
 ---------------------------------------------------------------------------
--- On and off
+-- On and off, the note, /gcr paths
 ---------------------------------------------------------------------------
 local ticker
 
@@ -305,6 +307,45 @@ local function Count()
     return p and p.total or 0, zones
 end
 
+local function Status()
+    local p = DB()
+    if not p then return end
+    local total, zones = Count()
+    ns.Print((L["Paths: recording is %s. %d path pieces in %d zones (at most %d), about %d KB in the saved data. Only on this computer."]):format(
+        p.off and L["|cffff0000OFF|r"] or L["|cff00ff00ON|r"], total, zones, MAX_TOTAL, floor(total * BYTES_PER_PIECE / 1024 + 0.5)))
+    local list = {}
+    for mapID, z in pairs(p.zones) do list[#list + 1] = { mapID = mapID, n = z.n } end
+    table.sort(list, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.mapID < b.mapID end)
+    for i = 1, min(10, #list) do
+        print(("  %s: %d"):format(ns.GetZoneName and ns.GetZoneName(list[i].mapID) or tostring(list[i].mapID), list[i].n))
+    end
+    if #list > 10 then print((L["  ... and %d more zones"]):format(#list - 10)) end
+    print("  /gcr paths | /gcr paths on | /gcr paths off | /gcr paths clear")
+end
+
+local function Command(rest)
+    local cmd, arg = (rest or ""):lower():match("^(%S*)%s*(.-)%s*$")
+    local p = DB()
+    if not p then return end
+    if cmd == "on" or cmd == "off" then
+        SetEnabled(cmd == "on")
+        Status()
+    elseif cmd == "clear" then
+        local total = p.total
+        if arg == "yes" then
+            p.zones, p.total = {}, 0
+            Forget()
+            ns.Print((L["Recorded paths deleted (%d path pieces). Your nodes and everything else are untouched."]):format(total))
+        elseif total == 0 then
+            ns.Print(L["No paths recorded yet."])
+        else
+            ns.Print((L["This deletes the %d recorded path pieces and nothing else. To do it: /gcr paths clear yes"]):format(total))
+        end
+    else
+        Status()
+    end
+end
+
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -314,6 +355,16 @@ frame:SetScript("OnEvent", function(_, event)
         local p = DB()
         if not p then return end
         StartStop()
+        if not p.hinted then
+            p.hinted = true
+            -- once, some seconds after the first login with this version (the chat is quiet by then)
+            C_Timer.After(12, function()
+                local now = DB()
+                if now and not now.off then
+                    ns.Print((L["New: Gathercraft notes which ways you ride, as small pieces per map square - only on this computer, nothing is sent. Later routes can go around obstacles with it. Switch: Options, %s. What it holds: /gcr paths"]):format(L["Sharing"]))
+                end
+            end)
+        end
     else
         -- a loading screen: whatever square you were in, the next look starts anew
         Forget()
@@ -324,7 +375,8 @@ ns.PathsLook = Look
 ns.PathsEnabled = Enabled
 ns.PathsSetEnabled = SetEnabled
 ns.PathsCount = Count
-ns.PathsLimits = function() return MAX_TOTAL, MAX_ZONE, TILE end
+ns.PathsCommand = Command
+ns.PathsLimits = function() return MAX_TOTAL, MAX_ZONE, TILE, BYTES_PER_PIECE end
 -- What is known about the crossing from square (tx, ty) into its neighbour
 -- (dx, dy): count, cost (1 = straight), falls, swims, days since 2026-01-01
 ns.PathsPiece = function(mapID, tx, ty, dx, dy)

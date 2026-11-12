@@ -9319,6 +9319,147 @@ step("Paths: at most 30,000 pieces, 8,000 a zone - the longest unused go first; 
     W.Done()
     if not ok then error(err, 0) end
 end)
+step("Paths: on by default with a switch in the options, a note once, /gcr paths and /gcr paths clear (v0.1.22 W7)", function()
+    -- Sven, 12.11.2026: always outside, on by default, a note the first
+    -- time, a switch in the options; the data stays on this computer.
+    local W = PathsWorld()
+    local L = ns.L
+    local win = _G.GathercraftOptions
+    local wasOpen = win:IsShown()
+    local nodesBefore = 0
+    for _, list in pairs(ns.db.nodes) do nodesBefore = nodesBefore + #list end
+    local function Said(from, text)
+        for i = from + 1, #log do if log[i]:find(text, 1, true) then return true end end
+        return false
+    end
+    local NOTE = (L["New: Gathercraft notes which ways you ride, as small pieces per map square - only on this computer, nothing is sent. Later routes can go around obstacles with it. Switch: Options, %s. What it holds: /gcr paths"]):format(L["Sharing"])
+    local ok, err = pcall(function()
+        -- the note: once, some seconds after the first login with this version
+        advance(30) -- (the note of the session's own login is said and over)
+        ns.db.paths = nil
+        local mark = #log
+        fire("PLAYER_LOGIN")
+        advance(5)
+        assert(not Said(mark, NOTE), "the note came in the first seconds of the login")
+        advance(20)
+        assert(Said(mark, NOTE), "no note after the first login")
+        assert(ns.PathsEnabled() == true and ns.db.paths.off == nil, "not on by default")
+        mark = #log
+        fire("PLAYER_LOGIN")
+        advance(30)
+        assert(not Said(mark, NOTE), "the note came a second time")
+        -- somebody who turned it off before the note is not told that it records
+        ns.db.paths = { off = true }
+        mark = #log
+        fire("PLAYER_LOGIN")
+        advance(30)
+        assert(not Said(mark, NOTE) and ns.PathsEnabled() == false, "turned off, and the note says it records")
+        ns.PathsSetEnabled(true)
+
+        -- the switch: on the page with room for it, with its header and its hint
+        if not wasOpen then ns.ToggleOptions() end
+        ns.ShowOptionsSection("sync")
+        local function Find(text)
+            for _, f in ipairs(allFrames) do
+                if f.__kind == "FontString" and f.__text == text then return f end
+            end
+        end
+        local label = Find(L["Record the paths I ride"])
+        assert(label, "no switch \"Record the paths I ride\" in the options")
+        assert(Find(L["Paths"]) and Find(L["Only on this computer, nothing is sent. Helps routes later."]), "the switch has no header or no hint")
+        local box = (label.__pts.TOPLEFT and label.__pts.TOPLEFT[1]) or (label.__pts.LEFT and label.__pts.LEFT[1])
+        assert(box and box.__kind == "CheckButton" and box.get and box.__scripts.OnClick, "test setup: the switch")
+        local page = label.__parent
+        while page and not page.key do page = page.__parent end
+        assert(page and page.key == "sync", "the switch is on page " .. tostring(page and page.key))
+        assert(box.get() == true, "on by default, and the box is empty")
+        box:SetChecked(false) box.__scripts.OnClick(box)
+        assert(ns.db.paths.off == true and ns.PathsEnabled() == false and box.get() == false, "unticked: still recording")
+        local before = W.Total()
+        W.Start(100, 120)
+        W.Go(1, 0, 60)
+        assert(W.Total() == before, "unticked, and a ride was recorded")
+        box:SetChecked(true) box.__scripts.OnClick(box)
+        assert(ns.db.paths.off == nil and ns.PathsEnabled() == true and box.get() == true, "ticked again: not recording")
+        W.Start(100, 122)
+        W.Go(1, 0, 60)
+        assert(W.Total() == before + 2, "ticked again, and a ride was not recorded")
+        -- every page still ends above the footer
+        local used = ns.OptionsUsedHeight()
+        local ROOM = 640 - 112 - 18 - 4 - 66
+        assert(used.sync <= ROOM, ("Options sync: %d px of %d"):format(used.sync, ROOM))
+
+        -- /gcr paths: on or off, pieces, zones, the limit, the size - and the zones
+        ns.db.paths = nil
+        mark = #log
+        slash("paths")
+        local _, _, _, bytes = ns.PathsLimits()
+        assert(Said(mark, (L["Paths: recording is %s. %d path pieces in %d zones (at most %d), about %d KB in the saved data. Only on this computer."]):format(L["|cff00ff00ON|r"], 0, 0, 30000, 0)), "/gcr paths with nothing recorded")
+        W.Start(100, 124)
+        W.Go(1, 0, 110)
+        player.map = 1411
+        W.Start(100, 124)
+        W.Go(1, 0, 60)
+        player.map = 1412
+        mark = #log
+        slash("paths")
+        assert(Said(mark, (L["Paths: recording is %s. %d path pieces in %d zones (at most %d), about %d KB in the saved data. Only on this computer."]):format(L["|cff00ff00ON|r"], 6, 2, 30000, math.floor(6 * bytes / 1024 + 0.5))), "/gcr paths after two rides")
+        assert(Said(mark, ("  %s: %d"):format(ns.GetZoneName(1412), 4)) and Said(mark, ("  %s: %d"):format(ns.GetZoneName(1411), 2)), "/gcr paths does not list the zones with their pieces")
+        assert(bytes >= 25 and bytes <= 29, "a piece is said to take " .. tostring(bytes) .. " bytes; the saved file has 26.7")
+        -- /gcr paths off and on do what the switch does
+        slash("paths off")
+        assert(ns.db.paths.off == true and box.get() == false, "/gcr paths off")
+        mark = #log
+        slash("paths")
+        assert(Said(mark, L["|cffff0000OFF|r"]), "/gcr paths does not say that it is off")
+        slash("paths on")
+        assert(ns.db.paths.off == nil and box.get() == true, "/gcr paths on")
+
+        -- /gcr paths clear asks first, deletes only the paths, and says so
+        mark = #log
+        slash("paths clear")
+        assert(Said(mark, (L["This deletes the %d recorded path pieces and nothing else. To do it: /gcr paths clear yes"]):format(6)), "/gcr paths clear does not ask")
+        assert(W.Total() == 6, "/gcr paths clear deleted without the yes")
+        slash("paths clear no")
+        assert(W.Total() == 6, "/gcr paths clear no deleted")
+        mark = #log
+        slash("paths clear yes")
+        assert(Said(mark, (L["Recorded paths deleted (%d path pieces). Your nodes and everything else are untouched."]):format(6)), "/gcr paths clear yes does not say what it did")
+        local total, zones = ns.PathsCount()
+        assert(total == 0 and zones == 0, "/gcr paths clear yes left pieces")
+        assert(ns.db.paths.off == nil and ns.PathsEnabled() == true, "/gcr paths clear yes turned the recording off")
+        local nodesAfter = 0
+        for _, list in pairs(ns.db.nodes) do nodesAfter = nodesAfter + #list end
+        assert(nodesAfter == nodesBefore, "/gcr paths clear yes changed the nodes")
+        mark = #log
+        slash("paths clear")
+        assert(Said(mark, L["No paths recorded yet."]), "/gcr paths clear with nothing recorded")
+        -- recording goes on right after it
+        W.Start(100, 126)
+        W.Go(1, 0, 60)
+        assert(W.Total() == 2, "after /gcr paths clear yes nothing is recorded any more")
+        -- the help names the command
+        mark = #log
+        slash("help")
+        assert(Said(mark, L["  /gcr paths        - the ways you ride, noted on this computer"]), "/gcr help does not name /gcr paths")
+        -- every text in this language
+        if LOCALE ~= "enUS" then
+            for _, key in ipairs({ "Paths", "Record the paths I ride", "Only on this computer, nothing is sent. Helps routes later.", "  ... and %d more zones",
+                "No paths recorded yet.", "  /gcr paths        - the ways you ride, noted on this computer" }) do
+                assert(L[key] ~= key, "not translated: " .. key)
+            end
+        end
+        -- more than ten zones: the ten with the most pieces, and how many more
+        local z = ns.db.paths.zones
+        for i = 1, 13 do z[2000 + i] = { n = i, e = {} } end
+        mark = #log
+        slash("paths")
+        assert(Said(mark, (L["  ... and %d more zones"]):format(4)), "14 zones: the line about the rest")
+    end)
+    if not wasOpen and win:IsShown() then ns.ToggleOptions() end
+    W.Done()
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,

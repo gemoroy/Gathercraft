@@ -1374,6 +1374,7 @@ local function Help()
     print(L["  /gcr news         - what's new and what comes next"])
     print(L["  /gcr skills       - your gathering skills and what we learned"])
     print(L["  /gcr sync         - sync status and options"])
+    print(L["  /gcr paths        - the ways you ride, noted on this computer"])
     print(L["  /gcr loadall      - load known spawn points for the whole continent"])
     print(L["  /gcr rare         - test the rare alert"])
     print(L["  /gcr debug        - toggle debug output"])
@@ -1449,6 +1450,8 @@ SlashCmdList.GATHERCRAFT = function(msg)
         if ns.SyncCommand then
             ns.SyncCommand(rest)
         end
+    elseif cmd == "paths" then
+        if ns.PathsCommand then ns.PathsCommand(rest) end
     elseif cmd == "perf" then
         if ns.SyncPerf then ns.SyncPerf() end
     elseif cmd == "loadall" then

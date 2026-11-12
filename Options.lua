@@ -1028,6 +1028,13 @@ local function Build()
             ns.db.sync.announceOn = on or nil
             ns.db.sync.announceOff = nil
         end)
+    -- (v0.1.22 W7) not shared at all - it stands here because this page has
+    -- the room: Farm runs and General are full to the last row
+    AddHeader("Paths")
+    AddCheck("Record the paths I ride",
+        function() return ns.PathsEnabled ~= nil and ns.PathsEnabled() end,
+        function(on) if ns.PathsSetEnabled then ns.PathsSetEnabled(on) end end)
+    AddHint("Only on this computer, nothing is sent. Helps routes later.")
     -- what sharing did so far, kept up to date while the section is open
     nextY = nextY - 10
     AddHeader("Right now")
