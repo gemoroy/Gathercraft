@@ -51,6 +51,7 @@ local QUERY_COOLDOWN = 600    -- seconds before asking for the same zone again
 local QUERY_HEARD = 120       -- someone else asked for the zone this recently: their answers reach us too
 local QUERY_JITTER = 15       -- seconds: wait a random moment before asking (others may ask first)
 local MAX_RESPONDERS = 3
+local ANSWER_WAIT_MIN, ANSWER_WAIT_MAX = 2, 15 -- seconds: the random wait before an answer starts
 local ANSWER_MORE_SHARE = 0.2 -- a zone question is answered only with this much more than the asker knows ...
 local ANSWER_MORE_NODES = 20  -- ... and at least this many nodes more (see WorthAnswering)
 local PENDING_MAX_AGE = 7 * 24 * 3600
@@ -68,11 +69,12 @@ local JOIN_DELAY = 8          -- seconds after login (let General/Trade join fir
 local TYPE_CODE = { herb = "h", ore = "o", chest = "c" }
 local CODE_TYPE = { h = "herb", o = "ore", c = "chest" }
 
-local queue = {}              -- outgoing messages { text, target }
+local queue = {}              -- outgoing messages { text, target, answer }
+local sendTicker                -- the ticker that sends the queue, one message every SEND_INTERVAL
 local channelID
 local rate = {}               -- sender -> { start, count }
 local lastQuery = {}          -- mapID -> time (kept in the saved data: a /reload doesn't ask again)
-local answering = {}          -- mapID -> { responders = {} }
+local answering = {}          -- mapID -> our answer to a zone question, from the question to its last packet (see OnQuery)
 local answeredAt = {}         -- mapID -> time we last answered a query for it
 local heardQuery = {}         -- mapID -> time someone else asked for it in the channel
 local recv = { start = 0, count = 0, processed = 0 }
@@ -136,15 +138,50 @@ end
 ---------------------------------------------------------------------------
 -- Sending
 ---------------------------------------------------------------------------
-local function Enqueue(text, target)
+local function Enqueue(text, target, answer)
     -- never more than about a minute of sending waits: a flood of work can't
     -- block our own harvest messages for long
     if #queue >= QUEUE_MAX then
         stats.dropped = stats.dropped + 1
         return false
     end
-    queue[#queue + 1] = { text = text, target = target }
+    queue[#queue + 1] = { text = text, target = target, answer = answer }
     return true
+end
+
+-- Our answer to a zone question goes out packet by packet, and before every
+-- packet it is asked again whether enough others answer (v0.1.22 S2; Sven's
+-- debug logs of 11. and 12.11.2026: 6-7 players answered one question. The
+-- lock used to count only answers that had arrived before the own wait was
+-- over - several players started before any answer was heard).
+--   Who goes on? The first MAX_RESPONDERS in the channel. The channel hands
+-- everyone the messages in one order, so each player can tell his place: the
+-- others' answers he heard before his own first packet came back to him.
+-- After that nothing is counted any more (`closed`): whoever comes later
+-- stops himself. Should the own packet never come back, the count closes
+-- with the second packet.
+--   Returns true when this packet must not be sent.
+local function AnswerStops(a)
+    if not a.stopped and a.ahead >= MAX_RESPONDERS then
+        a.stopped = true
+        if answering[a.mapID] == a then answering[a.mapID] = nil end
+        stats.answersStopped = (stats.answersStopped or 0) + 1
+        Debug(("stopped answering zone %d after %d of %d packets: %d others were first"):format(a.mapID, a.sent, a.packets, a.ahead))
+    end
+    return a.stopped
+end
+
+local function AnswerSent(a, text)
+    a.sent = a.sent + 1
+    if a.sent == 1 then a.first = text else a.closed = true end
+    if a.sent >= a.packets and answering[a.mapID] == a then answering[a.mapID] = nil end
+end
+
+-- Our own first packet came back from the channel: our place is known
+local function AnswerEcho(text)
+    for _, a in pairs(answering) do
+        if a.first == text then a.closed = true end
+    end
 end
 
 -- A client that refuses addon messages (e.g. a trial account) may throw
@@ -156,8 +193,12 @@ local function Send(...)
 end
 
 local function SendNext()
-    local item = table.remove(queue, 1)
-    if not item then return end
+    local item
+    repeat
+        -- (the packets of a stopped answer cost no turn: what waits behind them goes out now)
+        item = table.remove(queue, 1)
+        if not item then return end
+    until not (item.answer and AnswerStops(item.answer))
     local ok, err
     if item.target == "GUILD" then
         if IsInGuild() then
@@ -172,6 +213,7 @@ local function SendNext()
             if time() - t > 60 then sentAt[text] = nil end
         end
     end
+    if item.answer then AnswerSent(item.answer, item.text) end
     Debug(("sent [%s] %s -> %s%s"):format(item.target, item.text:sub(1, 60), tostring(ok),
         err and (" (" .. tostring(err) .. ")") or ""))
 end
@@ -184,13 +226,18 @@ local function EncodeNode(n)
     return ("%s,%s,%d,%d,%d"):format(n.id, TYPE_CODE[n.type] or "x", Coord(n.x), Coord(n.y), n.item or 0)
 end
 
--- Sends a list of nodes of one zone, packed into as few messages as possible
-local function SendNodes(mapID, nodes, targets)
+-- Sends a list of nodes of one zone, packed into as few messages as possible.
+-- `answer`: the packets belong to this answer to a zone question (see
+-- AnswerStops). Returns how many messages wait in the queue for it.
+local function SendNodes(mapID, nodes, targets, answer)
     local head = "N:" .. mapID
     local msg = head
+    local queued = 0
     local function flush()
         if msg ~= head then
-            for _, t in ipairs(targets) do Enqueue(msg, t) end
+            for _, t in ipairs(targets) do
+                if Enqueue(msg, t, answer) then queued = queued + 1 end
+            end
         end
         msg = head
     end
@@ -200,6 +247,7 @@ local function SendNodes(mapID, nodes, targets)
         msg = msg .. part
     end
     flush()
+    return queued
 end
 
 local function Targets()
@@ -561,9 +609,13 @@ local function OnNodes(body, sender, trusted, dry)
         Debug("rate limit hit by " .. sender)
         return
     end
-    -- Someone answered a zone query: we may not need to answer ourselves
-    if answering[mapID] then
-        answering[mapID].responders[sender] = true
+    -- Someone answers a zone query: we may not need to answer ourselves, or
+    -- not to the end (see AnswerStops). A harvest somebody shares is one node
+    -- in a message - that is no answer.
+    local a = answering[mapID]
+    if a and not dry and not a.closed and #parts - 1 >= 2 and not a.responders[sender] then
+        a.responders[sender] = true
+        a.ahead = a.ahead + 1
     end
     for i = 2, #parts do
         HandleNode(mapID, parts[i], sender, trusted, dry)
@@ -613,14 +665,16 @@ local function OnQuery(body, sender, distribution)
     -- Only answer if we can add something
     if not WorthAnswering(#own, theirCount) then return end
     if Busy() then return end
-    -- Wait a random moment; if enough others answer first, stay quiet
-    answering[mapID] = { responders = {} }
-    C_Timer.After(2 + math.random() * 6, function()
-        local a = answering[mapID]
-        answering[mapID] = nil
-        local count = 0
-        for _ in pairs(a.responders) do count = count + 1 end
-        if count >= MAX_RESPONDERS then return end
+    -- Wait a random moment; if enough others answer first, stay quiet. The
+    -- answer is kept in `answering` until its last packet is out: the others'
+    -- answers are counted for it up to the moment our place is known.
+    local a = { mapID = mapID, responders = {}, ahead = 0, sent = 0, packets = 0 }
+    answering[mapID] = a
+    C_Timer.After(ANSWER_WAIT_MIN + math.random() * (ANSWER_WAIT_MAX - ANSWER_WAIT_MIN), function()
+        if a.ahead >= MAX_RESPONDERS then
+            if answering[mapID] == a then answering[mapID] = nil end
+            return
+        end
         answeredAt[mapID] = time()
         -- others take at most RATE_MAX_NODES from one player a minute: send
         -- the best known ones, no more
@@ -628,8 +682,9 @@ local function OnQuery(body, sender, distribution)
             table.sort(own, function(x, y) return (x.count or 0) > (y.count or 0) end)
             for i = #own, RATE_MAX_NODES + 1, -1 do own[i] = nil end
         end
-        SendNodes(mapID, own, { distribution == "GUILD" and "GUILD" or "CHANNEL" })
-        Debug(("answered zone %d with %d nodes (they knew %d)"):format(mapID, #own, theirCount))
+        a.packets = SendNodes(mapID, own, { distribution == "GUILD" and "GUILD" or "CHANNEL" }, a)
+        if a.packets == 0 and answering[mapID] == a then answering[mapID] = nil end
+        Debug(("answering zone %d with %d nodes in %d packets (they knew %d)"):format(mapID, #own, a.packets, theirCount))
     end)
 end
 
@@ -656,7 +711,10 @@ local function Receive(prefix, text, distribution, sender, dry)
     msgMap = tonumber(msgMap)
     if not dry then
         -- our own messages come back from the channel: not worth a debug line
-        if IsSelf(sender) or LearnSelf(sender, text) then return end
+        if IsSelf(sender) or LearnSelf(sender, text) then
+            AnswerEcho(text)
+            return
+        end
         if ns.db.debug then
             local zone = msgMap and ns.GetZoneName and ns.GetZoneName(msgMap)
             Debug(("recv [%s] %s: %s%s"):format(distribution, sender, text:sub(1, 60),
@@ -938,7 +996,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
         playerName = (ns.Readable(UnitName("player"), "sync") or "") .. "-" .. (GetNormalizedRealmName() or "")
         C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
-        C_Timer.NewTicker(SEND_INTERVAL, SendNext)
+        -- (one ticker, whatever tells us about the login twice: two would send two
+        -- packets of an answer before the first has come back, see AnswerStops)
+        if not sendTicker then sendTicker = C_Timer.NewTicker(SEND_INTERVAL, SendNext) end
         C_Timer.After(JOIN_DELAY, function()
             JoinChannel()
             C_Timer.After(2, CurrentZoneQuery)

@@ -8571,6 +8571,145 @@ step("Sharing: a zone question is answered only when the answer adds clearly mor
     if not ok then error(err, 0) end
 end)
 
+step("Sharing: an answer stops when three others answered first, also in the middle (v0.1.22 S2)", function()
+    -- Sven's debug logs, 11. and 12.11.2026: 6-7 players answered one question.
+    -- The old lock only counted answers that ARRIVED before the own wait was
+    -- over; an answer goes out in packets 1.2 s apart, so several started
+    -- before any was heard. Now every packet asks again. Who was first is told
+    -- by the channel's order, which is the same for everyone: the others'
+    -- answers heard before the own first packet came back.
+    local saved = ns.db.sync.enabled
+    slash("sync on")
+    -- (a test before this one may have told the addon about the login a second time, and
+    -- this one does it for sure: there is still one ticker that sends, a packet every 1.2 s)
+    fire("PLAYER_LOGIN")
+    advance(700)
+    local me = UnitName("player")
+    local zones = {}
+    local function Start(mapID)
+        zones[#zones + 1] = mapID
+        S22Zone(mapID, 100)
+        local from = #sentMessages
+        S22Msg(("Q:%d:0"):format(mapID), "Asker-Realm")
+        return from
+    end
+    -- until our first packet is out (at most 20 s)
+    local function First(mapID, from)
+        for _ = 1, 100 do
+            local messages, _, first = S22Sent(mapID, from)
+            if messages > 0 then return first end
+            advance(0.2)
+        end
+        error("no answer started for zone " .. mapID, 0)
+    end
+    local ok, err = pcall(function()
+        -- three answers before ours started: we stay quiet (as before)
+        local from = Start(1521)
+        for k = 1, 3 do S22Other(1521, "Early" .. k .. "-Realm", 8) end
+        advance(60)
+        assert(S22Sent(1521, from) == 0, "three others answered during the wait, and we answered too")
+
+        -- the lock looks at answers, not at somebody's harvest: one node in a message is no answer
+        from = Start(1522)
+        for k = 1, 3 do S22Other(1522, "Gatherer" .. k .. "-Realm", 1) end
+        advance(60)
+        local _, nodes = S22Sent(1522, from)
+        assert(nodes == 100, "three harvests in the zone, and the answer had " .. nodes .. " nodes, want 100")
+
+        -- three others were ahead of us in the channel (heard before our first packet came back): we stop
+        from = Start(1523)
+        local first = First(1523, from)
+        for k = 1, 3 do S22Other(1523, "Ahead" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        advance(60)
+        local messages = S22Sent(1523, from)
+        assert(messages == 1, "three others were ahead, and we sent " .. messages .. " packets, want 1")
+        -- ... and the question is not answered again right away
+        S22Msg("Q:1523:0", "Asker Two-Realm")
+        advance(60)
+        assert(S22Sent(1523, from) == 1, "a stopped answer was started again within the five minutes")
+
+        -- only two were ahead: we are the third and go on to the end
+        from = Start(1524)
+        first = First(1524, from)
+        for k = 1, 2 do S22Other(1524, "Ahead" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        for k = 1, 5 do S22Other(1524, "Behind" .. k .. "-Realm", 8) end -- (they came after us: they stop, not we)
+        advance(60)
+        _, nodes = S22Sent(1524, from)
+        assert(nodes == 100, "we were the third to answer and sent " .. nodes .. " of 100 nodes")
+
+        -- the same players' later packets do not count twice
+        from = Start(1525)
+        first = First(1525, from)
+        for _ = 1, 4 do S22Other(1525, "Ahead1-Realm", 8) S22Other(1525, "Ahead2-Realm", 8) end
+        S22Msg(first, me)
+        advance(60)
+        _, nodes = S22Sent(1525, from)
+        assert(nodes == 100, "two players with many packets stopped our answer (" .. nodes .. " of 100 nodes)")
+
+        -- our own packet never comes back (it can be lost): what was heard up to our second packet counts
+        from = Start(1526)
+        First(1526, from)
+        for k = 1, 3 do S22Other(1526, "Ahead" .. k .. "-Realm", 8) end
+        advance(60)
+        messages = S22Sent(1526, from)
+        assert(messages == 1, "no echo, three others right after our first packet: " .. messages .. " packets, want 1")
+        from = Start(1527)
+        First(1527, from)
+        advance(1)
+        assert(S22Sent(1527, from) == 1, "a second packet within a second of the first: more than one send ticker")
+        advance(1) -- (our second packet is out)
+        for k = 1, 3 do S22Other(1527, "Late" .. k .. "-Realm", 8) end
+        advance(60)
+        _, nodes = S22Sent(1527, from)
+        assert(nodes == 100, "no echo, three others after our second packet: " .. nodes .. " of 100 nodes")
+
+        -- a stopped answer leaves nothing behind in the queue: a harvest goes out at once
+        from = Start(1528)
+        first = First(1528, from)
+        for k = 1, 3 do S22Other(1528, "Ahead" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        local node = { id = "o1619", name = "Silverleaf", type = "herb", x = 0.33, y = 0.66, count = 1, last = time() }
+        table.insert(ns.db.nodes[1412], node)
+        local before = #sentMessages
+        ns.SyncShare(1412, node)
+        advance(3)
+        local shared = false
+        for i = before + 1, #sentMessages do if sentMessages[i]:find("^N:1412;o1619,") then shared = true end end
+        for i, n in ipairs(ns.db.nodes[1412]) do if n == node then table.remove(ns.db.nodes[1412], i) break end end
+        assert(shared, "after a stopped answer the own harvest waited behind its packets")
+
+        -- the wait is spread over 2 to 15 seconds
+        local realRandom = math.random
+        math.random = function(a, b) if a then return b or a end return 0.999 end
+        local fine, problem = pcall(function()
+            from = Start(1529)
+            advance(13)
+            assert(S22Sent(1529, from) == 0, "the longest wait is shorter than 13 s")
+            advance(5)
+            assert(S22Sent(1529, from) > 0, "the longest wait is longer than 18 s")
+        end)
+        math.random = realRandom
+        if not fine then error(problem, 0) end
+        advance(60) -- (that answer is out: the next one does not wait behind its packets)
+        math.random = function(a, b) if a then return a end return 0 end
+        fine, problem = pcall(function()
+            from = Start(1530)
+            advance(1.9)
+            assert(S22Sent(1530, from) == 0, "the shortest wait is under 2 s")
+            advance(2)
+            assert(S22Sent(1530, from) > 0, "the shortest wait is over 3.9 s")
+        end)
+        math.random = realRandom
+        if not fine then error(problem, 0) end
+        advance(120)
+    end)
+    for _, mapID in ipairs(zones) do ns.db.nodes[mapID] = nil end
+    ns.NotifyNodesChanged()
+    if not saved then slash("sync off") end
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,

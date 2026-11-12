@@ -721,7 +721,8 @@ local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed
     for _, m in ipairs(net.log) do
         if m.kind == "Q" then queries = queries + 1 end
         if m.kind == "N" and m.from ~= "Asker" then
-            if not senders[m.from] then senders[m.from] = true senders[#senders + 1] = m.from end
+            if not senders[m.from] then senders[m.from] = 0 senders[#senders + 1] = m.from end
+            senders[m.from] = senders[m.from] + 1
             messages, nodes, last = messages + 1, nodes + m.nodes, math.max(last, m.at - start)
         end
     end
@@ -730,6 +731,10 @@ local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed
     print(("\n=== %s ==="):format(title))
     print(("  %d players know %d-%d of the zone's %d new nodes; the asker knew %d and asked %d time(s)"):format(knowers, knownMin, knownMax, world, before, queries))
     print(("  Answering players: %d   their messages: %d   nodes sent: %d   last message after %.0f s"):format(#senders, messages, nodes, last))
+    local each = {}
+    for i, name in ipairs(senders) do each[i] = senders[name] end
+    table.sort(each, function(x, y) return x > y end)
+    print("  Messages of each answering player: " .. (#each > 0 and table.concat(each, " ") or "-"))
     print(("  The asker knows %d now (%d new); %d of the nodes sent were of no use to him"):format(now, now - before, nodes - (now - before)))
     return { answering = #senders, messages = messages, nodes = nodes, gained = now - before }
 end
