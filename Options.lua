@@ -1023,10 +1023,8 @@ local function Build()
     AddCheck("Tell me in chat when spots of other players arrive",
         function() return (ns.db.sync and ns.db.sync.announceOn) == true end,
         function(on)
-            -- off by default (0.1.21, T9); the old "turned off" mark goes
-            -- with the first choice made here
-            ns.db.sync.announceOn = on or nil
-            ns.db.sync.announceOff = nil
+            -- (turning it off also throws away a line that waits: Sync.lua)
+            ns.SyncSetAnnounce(on)
         end)
     -- (v0.1.22 W7) not shared at all - it stands here because this page has
     -- the room: Farm runs and General are full to the last row

@@ -492,15 +492,41 @@ end
 -- the old announceOff (0.1.20 and before: true = turned off, nil = never
 -- touched) is not asked any more - both mean "off" now.
 local ANNOUNCE_DELAY, ANNOUNCE_GAP = 20, 180
-local announce = { zones = {}, total = 0, lastAt = 0, pending = false }
+local announce = { zones = {}, total = 0, lastAt = 0, pending = false, round = 0 }
+
+-- The line that waits is thrown away, with what was counted for it. A
+-- timer already on its way belongs to a round that is over and says nothing
+-- (R1 S-N1; Codex, 13.11.2026: off and on again within a second - the timer
+-- only asked the switch when its time had come, and the old line came).
+local function AnnounceDrop()
+    announce.zones, announce.total, announce.pending = {}, 0, false
+    announce.round = announce.round + 1
+end
+
+-- The switch in the options
+local function SetAnnounce(on)
+    local db = DB()
+    if not db then return end
+    -- off by default (0.1.21, T9); the old "turned off" mark goes with the
+    -- first choice made here
+    db.announceOn = on and true or nil
+    db.announceOff = nil
+    if not on then AnnounceDrop() end
+end
+
 local function AnnounceImport(mapID)
-    if DB().announceOn ~= true then return end
+    if DB().announceOn ~= true then
+        if announce.pending then AnnounceDrop() end
+        return
+    end
     announce.zones[mapID] = (announce.zones[mapID] or 0) + 1
     announce.total = announce.total + 1
     if announce.pending then return end
     announce.pending = true
     local wait = math.max(ANNOUNCE_DELAY, announce.lastAt + ANNOUNCE_GAP - time())
+    local round = announce.round
     C_Timer.After(wait, function()
+        if announce.round ~= round then return end
         announce.pending = false
         -- turned off while the line waited: it is dropped, and what was
         -- counted for it is not said late (v0.1.22 S4; Codex, 12.11.2026, R3-N1)
@@ -1217,4 +1243,5 @@ ns.SyncPending = function(mapID)
 end
 ns.SyncDisplayName = DisplayName
 ns.SyncCommand = Command
+ns.SyncSetAnnounce = SetAnnounce
 ns.SyncPerf = Perf

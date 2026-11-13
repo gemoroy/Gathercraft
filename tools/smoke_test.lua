@@ -10142,6 +10142,84 @@ step("Sharing: when our own packet does not come back in time, we go on - and st
     advance(120)
     if not ok then error(err, 0) end
 end)
+step("Sharing: the chat line turned off and on again within seconds - the line that waited is gone at once (v0.1.22 R1 S-N1)", function()
+    -- Codex, 13.11.2026 (S-N1): turning the line off did not drop the line
+    -- on its way - its timer only asked the switch when its time had come. Off
+    -- after 5 s and on again a second later: the old line came. Now the
+    -- switch itself throws the waiting line away.
+    local db = ns.db.sync
+    local saved = { on = db.announceOn, off = db.announceOff, enabled = db.enabled }
+    local win = _G.GathercraftOptions
+    local wasOpen = win:IsShown()
+    slash("sync on")
+    local zone = ns.GetZoneName(1412)
+    local function Lines(count)
+        local n, text = 0, (ns.L["%d spots shared by other players added (%s)."]):format(count, zone)
+        for _, l in ipairs(log) do if l:find(text, 1, true) then n = n + 1 end end
+        return n
+    end
+    local function Any()
+        local n = 0
+        for k = 1, 9 do n = n + Lines(k) end
+        return n
+    end
+    local spot = 0
+    local function Arrive()
+        spot = spot + 1
+        local before = select(2, ns.SyncSummary())
+        fire("CHAT_MSG_ADDON", "Gathercraft", ("N:1412;o1622,h,%d,%d,2450"):format(2300 + spot * 47, 7300 + spot * 29), "GUILD", "Guildie Ten")
+        assert(select(2, ns.SyncSummary()) > before, "test setup: the spot was not taken")
+    end
+    local ok, err = pcall(function()
+        if not wasOpen then ns.ToggleOptions() end
+        ns.ShowOptionsSection("sync")
+        local label
+        for _, f in ipairs(allFrames) do
+            if f.__kind == "FontString" and f.__text == ns.L["Tell me in chat when spots of other players arrive"] then label = f end
+        end
+        local box = label and ((label.__pts.TOPLEFT and label.__pts.TOPLEFT[1]) or (label.__pts.LEFT and label.__pts.LEFT[1]))
+        assert(box and box.__kind == "CheckButton" and box.__scripts.OnClick, "test setup: the option's switch")
+        local function Switch(on) box:SetChecked(on) box.__scripts.OnClick(box) end
+        advance(400)
+        Switch(true)
+        assert(db.announceOn == true, "test setup: the line is on")
+
+        -- two spots, off after 5 s, on again a second later: nothing is said, however long we wait
+        local n0 = Any()
+        Arrive() Arrive()
+        advance(5)
+        Switch(false)
+        advance(1)
+        Switch(true)
+        advance(400)
+        assert(Any() == n0, "off and on again within a second: the line that waited came anyway")
+
+        -- ... and a spot that arrives after it was turned on again gets a line of its own, at its own time
+        Arrive() Arrive() Arrive()
+        advance(5)
+        Switch(false)
+        advance(1)
+        Switch(true)
+        advance(1)
+        local one = Lines(1)
+        Arrive()            -- 7 s after the three: the old line would be due 13 s from here
+        advance(15)
+        assert(Any() == n0, "the new spot was said at the old line's time")
+        advance(7)
+        assert(Lines(1) == one + 1 and Any() == n0 + 1, "after off and on the next spot is said as one spot, once - not with the old ones")
+
+        -- turned off and left off: nothing comes
+        Arrive()
+        advance(5)
+        Switch(false)
+        advance(400)
+        assert(Any() == n0 + 1, "turned off: the line came")
+    end)
+    db.announceOn, db.announceOff, db.enabled = saved.on, saved.off, saved.enabled
+    if not wasOpen then ns.ToggleOptions() end
+    advance(400)
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
