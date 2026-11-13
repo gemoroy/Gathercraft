@@ -8688,6 +8688,7 @@ step("Sharing: an answer stops when three others answered first, also in the mid
         local realRandom = math.random
         math.random = function(a, b) if a then return b or a end return 0.999 end
         local fine, problem = pcall(function()
+            advance(60) -- (the answers of the cases above are out: this one does not wait behind their packets)
             from = Start(1529)
             advance(13)
             assert(S22Sent(1529, from) == 0, "the longest wait is shorter than 13 s")
@@ -10067,6 +10068,8 @@ step("Sharing: when our own packet does not come back in time, we go on - and st
         S22Msg(first, me)
         advance(3)
         assert(S22Sent(1613, from) == 1, "three were ahead: we did not wait to see whether they go on")
+        advance(3)
+        assert(S22Sent(1613, from) > 1, "three were ahead and none went on: 6 s later we still wait (the wait is 4 s)")
         messages, nodes = Rest(1613, from)
         assert(nodes == 100, ("three were ahead and none went on: we sent %d packets with %d of 100 nodes"):format(messages, nodes))
         -- ... two of the three go on: still fewer than three answers, so ours is wanted
