@@ -9746,6 +9746,51 @@ step("Paths: the cost of a piece follows what you ride now and never freezes, al
     W.Done()
     if not ok then error(err, 0) end
 end)
+step("/gcr paths: in every language the number of pieces stands with the pieces and the number of zones with the zones (v0.1.22 R1 W-M3)", function()
+    -- Codex, 13.11.2026 (W-M3): the Korean line said "100 zones, 1 path
+    -- piece" for 100 pieces in one zone - the sentence named the first number
+    -- as zones, the code hands the pieces first. A check with the same
+    -- placeholders cannot see that; this one uses different numbers and the
+    -- words of each language.
+    local KEY = "Paths: recording is %s. %d path pieces in %d zones (at most %d), about %d KB in the saved data. Only on this computer."
+    local words = {
+        enUS = { "path pieces", "zones" }, deDE = { "Wegstücke", "Zonen" }, esES = { "tramos", "zonas" }, frFR = { "tronçons", "zones" },
+        itIT = { "tratti", "zone" }, koKR = { "길 조각", "구역", true }, ptBR = { "trechos", "zonas" }, ruRU = { "Отрезков пути", "зон", true },
+        zhCN = { "段路径", "个区域" }, zhTW = { "段路徑", "個區域" },
+    }
+    local PIECES, ZONES, MOST, KB = 4111, 37, 30000, 152
+    local function Check(code, text)
+        local w = words[code]
+        assert(w, "no words for " .. code)
+        local line = text:format("ON", PIECES, ZONES, MOST, KB)
+        local function At(what)
+            local from, to = line:find(what, 1, true)
+            assert(from, code .. ": \"" .. what .. "\" is not in the line: " .. line)
+            return { from, to }
+        end
+        -- the order in the line: "4111 pieces ... 37 zones", or (w[3]) "pieces 4111 ... zones 37"
+        local pieces, zones, pWord, zWord = At(tostring(PIECES)), At(tostring(ZONES)), At(w[1]), At(w[2])
+        local order = w[3] and { pWord, pieces, zWord, zones } or { pieces, pWord, zones, zWord }
+        for i = 1, 3 do
+            assert(order[i][2] < order[i + 1][1], code .. ": the numbers of pieces and zones do not stand with their words: " .. line)
+        end
+        -- the limit is a number of pieces and comes third, the size last
+        assert(At(tostring(MOST))[1] > zones[1] and At(tostring(KB))[1] > At(tostring(MOST))[1], code .. ": the limit or the size is out of place: " .. line)
+    end
+    Check("enUS", KEY)
+    for _, code in ipairs({ "deDE", "esES", "frFR", "itIT", "koKR", "ptBR", "ruRU", "zhCN", "zhTW" }) do
+        local text = ns.Locales[code] and ns.Locales[code][KEY]
+        assert(text, "no " .. code .. " text for the /gcr paths line")
+        Check(code, text)
+    end
+    -- every other new text of 0.1.22 has one number at most: nothing there to swap
+    for _, key in ipairs({ "  ... and %d more zones", "Recorded paths deleted (%d path pieces). Your nodes and everything else are untouched.",
+        "This deletes the %d recorded path pieces and nothing else. To do it: /gcr paths clear yes" }) do
+        local _, n = key:gsub("%%d", "")
+        assert(n == 1, "test setup: " .. key)
+    end
+    -- (that the command hands the pieces first and the zones second is checked in the W7 step: 6 pieces, 2 zones)
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
