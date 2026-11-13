@@ -207,6 +207,20 @@ local function Claim(saved, name, value, who, short)
     if short then SetOurs(saved, name, value, who) end
 end
 
+-- v0.1.22 (R1; Sven, 13.11.2026, live: the questing mode switched on in a
+-- fight - "[ADDON_ACTION_BLOCKED] AddOn 'Gathercraft' tried to call the
+-- protected function 'SetCVar()'"). The game refuses SetCVar in combat, and
+-- pcall does not catch that: it is no Lua error. So in combat nothing is set
+-- and nothing is put back. What was asked for is kept here - per user the
+-- last wish only - and done once at the end of the fight (SettleInteract).
+--   owed.fish, owed.gather: "widen" or "restore"; owed.all: put everything
+--   back (a /reload or a login in a fight)
+local owed = {}
+local function Owe(event, who, what)
+    owed[who] = what
+    ns.Debug(("FISH %s for %s (%s): in combat - no setting is changed now, it follows at the end of the fight"):format(what, who, event))
+end
+
 -- debug: one setting of the saved list (what we found, what we kept)
 local function DebugEntry(what, event, name, s, now, result)
     ns.Debug(("FISH %s (%s): %s orig %s, ours %s, now %s -> %s"):format(what, event, name,
@@ -217,6 +231,8 @@ end
 local function WidenInteract(event, who)
     who = who or "fish"
     if not (GetCVar and SetCVar and ns.db) then return end
+    if InCombatLockdown() then return Owe(event, who, "widen") end
+    owed[who] = nil
     ns.db.fishingCVars = ns.db.fishingCVars or {}
     local saved = ns.db.fishingCVars
     if not next(saved) then ns.Debug(("FISH start (%s): no entry of an earlier cast"):format(event)) end
@@ -260,6 +276,8 @@ end
 -- who: "fish" or "gather" - only what nobody else needs goes back; nil
 -- (login, logout): everything
 local function RestoreInteract(event, who)
+    if InCombatLockdown() then return Owe(event, who or "all", "restore") end
+    if who then owed[who] = nil else owed.fish, owed.gather, owed.all = nil, nil, nil end
     local saved = ns.db and ns.db.fishingCVars
     if not saved then
         ns.Debug(("FISH restore (%s): nothing of ours to put back"):format(event))
@@ -284,6 +302,20 @@ local function RestoreInteract(event, who)
         end
     end
     if not next(saved) then ns.db.fishingCVars = nil end
+end
+
+-- the end of a fight: what was asked for during it, each user's last wish, once
+local function SettleInteract(event)
+    local all, fish, gather = owed.all, owed.fish, owed.gather
+    owed.all, owed.fish, owed.gather = nil, nil, nil
+    if all then RestoreInteract(event) end
+    for who, what in pairs({ fish = fish, gather = gather }) do
+        if what == "widen" then
+            WidenInteract(event, who)
+        elseif not all then
+            RestoreInteract(event, who)
+        end
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -494,6 +526,7 @@ events:SetScript("OnEvent", function(_, event, _, _, spellID)
         if ns.db and ns.db.fishingCVars then RestoreInteract(event) end
         gathering = false
     elseif event == "PLAYER_REGEN_ENABLED" then
+        SettleInteract(event) -- settings asked for in the fight (the game refuses SetCVar in combat)
         SetReelBinding(lineOut)
         UpdateGatherHelp(event) -- a run or the questing mode began or ended in the fight
         Prepare()

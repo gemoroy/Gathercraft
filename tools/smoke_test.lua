@@ -10324,6 +10324,198 @@ step("/gcr perf: after minutes in which nothing at all ran, the last full minute
     advance(180)
     if not ok then error(err, 0) end
 end)
+step("Settings: no game setting is changed in combat - the gathering help and the bobber settings follow at the end of the fight (v0.1.22 R1, combat)", function()
+    -- Sven, 13.11.2026 (live, 0.1.22 a62cefe): the questing mode switched on
+    -- in a fight - "[ADDON_ACTION_BLOCKED] AddOn 'Gathercraft' tried to call
+    -- the protected function 'SetCVar()'". The client refuses SetCVar in
+    -- combat, and pcall does not catch that: it is no Lua error, the call is
+    -- just not done and the game shows the message. So in combat nothing is
+    -- set and nothing is put back; what is wanted at the end of the fight is
+    -- done then, once.
+    local saved = { get = GetCVar, set = SetCVar, set2 = SetOverrideBinding, clear = ClearOverrideBindings, combat = InCombatLockdown,
+        mark = ns.db.gatherMark, key = ns.db.gatherKey, cvars = ns.db.fishingCVars, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
+        map = player.map, x = player.x, y = player.y }
+    local YOURS = { SoftTargetInteract = "0", SoftTargetInteractRange = "10", SoftTargetInteractArc = "0", SoftTargetIconGameObject = "0" }
+    local OURS = { SoftTargetInteract = "3", SoftTargetInteractRange = "30", SoftTargetInteractArc = "2", SoftTargetIconGameObject = "1" }
+    local store = {}
+    local fighting = false
+    local calls, blocked = 0, 0
+    local function Is(want)
+        for k, v in pairs(want) do if tonumber(store[k]) ~= tonumber(v) then return false, k .. " is " .. tostring(store[k]) end end
+        return true
+    end
+    local function Fight(on)
+        fighting = on
+        if not on then fire("PLAYER_REGEN_ENABLED") advance(0.1) end
+        calls = 0
+    end
+    local function Quiet(what)
+        assert(blocked == 0, what .. ": SetCVar was called in combat (" .. blocked .. " times) - the game blocks that")
+    end
+    local function Cast() fire("UNIT_SPELLCAST_CHANNEL_START", "player", "r1c", 7620) end
+    local function Reel() fire("UNIT_SPELLCAST_CHANNEL_STOP", "player", "r1c", 7620) advance(1) end
+    local ok, err = pcall(function()
+        for k, v in pairs(YOURS) do store[k] = v end
+        GetCVar = function(k) return store[k] end
+        -- as the client: in combat the call is not done, and it is counted
+        -- (ADDON_ACTION_BLOCKED); no Lua error
+        SetCVar = function(k, v)
+            if fighting then blocked = blocked + 1 return end
+            calls = calls + 1
+            store[k] = tostring(v)
+            return true
+        end
+        SetOverrideBinding = function() end
+        ClearOverrideBindings = function() end
+        InCombatLockdown = function() return fighting end
+        ns.db.fishingCVars, ns.db.fishMarkBobber, ns.db.fishLoudSplash = nil, true, nil
+        ns.db.gatherMark, ns.db.gatherKey = true, nil
+        player.map, player.x, player.y = 1412, 0.45, 0.72
+        if ns.run then ns.StopRun(true) end
+        ns.SetQuestMode(false) advance(1)
+        assert(Is(YOURS) and ns.db.fishingCVars == nil, "before anything: settings are changed")
+
+        -- (1) the questing mode on in a fight (Sven's find): nothing in the fight, the mark after it
+        Fight(true)
+        ns.SetQuestMode(true) advance(1)
+        Quiet("questing mode on in a fight")
+        assert(Is(YOURS), "questing mode on in a fight: a setting changed")
+        advance(30) -- (the questing mode's own looks in the fight: nothing either)
+        Quiet("the questing mode's looks in a fight")
+        Fight(false)
+        local fine, why = Is(OURS)
+        assert(fine, "after the fight the node is not marked: " .. tostring(why))
+        advance(5)
+        assert(calls == 0, "after the fight the settings were set again later (" .. calls .. " calls)")
+
+        -- (2) off in a fight: nothing in the fight, everything back after it
+        Fight(true)
+        ns.SetQuestMode(false) advance(1)
+        Quiet("questing mode off in a fight")
+        assert(Is(OURS), "questing mode off in a fight: a setting changed")
+        Fight(false)
+        fine, why = Is(YOURS)
+        assert(fine and ns.db.fishingCVars == nil, "after the fight your settings are not back: " .. tostring(why))
+
+        -- (3) on, off, on in one fight: on after it, set once
+        Fight(true)
+        ns.SetQuestMode(true) advance(1)
+        ns.SetQuestMode(false) advance(1)
+        ns.SetQuestMode(true) advance(1)
+        Quiet("on, off, on in a fight")
+        fighting = false
+        calls = 0
+        fire("PLAYER_REGEN_ENABLED") advance(0.1)
+        assert(Is(OURS), "on, off, on in a fight: not on after it")
+        assert(calls == 4, "on, off, on in a fight: " .. calls .. " settings set after it, want 4 (each once)")
+        advance(5)
+        assert(calls == 4, "on, off, on in a fight: set again later")
+
+        -- (4) it was on; off, on, off in one fight: off after it, everything back, each once
+        Fight(true)
+        ns.SetQuestMode(false) advance(1)
+        ns.SetQuestMode(true) advance(1)
+        ns.SetQuestMode(false) advance(1)
+        Quiet("off, on, off in a fight")
+        fighting = false
+        calls = 0
+        fire("PLAYER_REGEN_ENABLED") advance(0.1)
+        assert(Is(YOURS) and ns.db.fishingCVars == nil, "off, on, off in a fight: your settings are not back after it")
+        assert(calls == 4, "off, on, off in a fight: " .. calls .. " settings put back, want 4 (each once)")
+
+        -- (5) it was off; on, off in one fight: nothing at all after it
+        Fight(true)
+        ns.SetQuestMode(true) advance(1)
+        ns.SetQuestMode(false) advance(1)
+        Quiet("on, off in a fight")
+        fighting = false
+        calls = 0
+        fire("PLAYER_REGEN_ENABLED") advance(0.1)
+        assert(calls == 0 and Is(YOURS) and ns.db.fishingCVars == nil, "on, off in a fight: " .. calls .. " settings touched after it")
+
+        -- (6) a setting you changed yourself during the fight stays yours
+        ns.SetQuestMode(true) advance(1)
+        assert(Is(OURS), "questing mode on outside a fight: not marked")
+        Fight(true)
+        ns.SetQuestMode(false) advance(1)
+        store.SoftTargetInteractRange = "45" -- (the player, in the options)
+        Fight(false)
+        assert(store.SoftTargetInteractRange == "45", "your own value was overwritten after the fight: " .. tostring(store.SoftTargetInteractRange))
+        assert(store.SoftTargetInteract == "0" and ns.db.fishingCVars == nil, "the other settings are not back after the fight")
+        store.SoftTargetInteractRange = "10"
+
+        -- (7) a cast in a fight: no setting, no error; the line still out after the fight: the bobber is in reach then
+        Fight(true)
+        Cast() advance(1)
+        Quiet("a cast in a fight")
+        assert(Is(YOURS), "a cast in a fight: a setting changed")
+        Fight(false)
+        assert(Is(OURS), "the line is still out after the fight: the bobber is not in reach")
+        Reel()
+        assert(Is(YOURS) and ns.db.fishingCVars == nil, "after reeling in your settings are not back")
+        -- ... cast and reeled in within the fight: nothing after it
+        Fight(true)
+        Cast() advance(1)
+        Reel()
+        Quiet("a cast and its end in a fight")
+        fighting = false
+        calls = 0
+        fire("PLAYER_REGEN_ENABLED") advance(0.1)
+        assert(calls == 0 and Is(YOURS), "a cast and its end in a fight: " .. calls .. " settings touched after it")
+        -- ... the line out before the fight, in during it: back after it
+        Cast() advance(1)
+        assert(Is(OURS), "a cast outside a fight: the bobber is not in reach")
+        Fight(true)
+        Reel()
+        Quiet("reeling in during a fight")
+        assert(Is(OURS), "reeling in during a fight: a setting changed")
+        Fight(false)
+        assert(Is(YOURS) and ns.db.fishingCVars == nil, "reeled in during a fight: your settings are not back after it")
+
+        -- (8) the louder splash the same
+        ns.db.fishLoudSplash = true
+        store.Sound_SFXVolume, store.Sound_MusicVolume, store.Sound_AmbienceVolume = "0.5", "0.4", "0.6"
+        Fight(true)
+        Cast() advance(1)
+        Quiet("a cast with the louder splash in a fight")
+        assert(store.Sound_SFXVolume == "0.5" and store.Sound_MusicVolume == "0.4", "the volume changed in a fight")
+        Fight(false)
+        assert(tonumber(store.Sound_SFXVolume) == 1 and tonumber(store.Sound_MusicVolume) == 0.1, "the splash is not louder after the fight")
+        Fight(true)
+        Reel()
+        Quiet("reeling in with the louder splash in a fight")
+        Fight(false)
+        assert(store.Sound_SFXVolume == "0.5" and store.Sound_MusicVolume == "0.4" and store.Sound_AmbienceVolume == "0.6",
+            "the volume is not back after the fight")
+        ns.db.fishLoudSplash = nil
+
+        -- (9) a /reload in a fight with the mark on: nothing is set; the list
+        -- is kept, so the settings go back after the fight or at the next login
+        ns.SetQuestMode(true) advance(1)
+        assert(Is(OURS), "questing mode on: not marked")
+        Fight(true)
+        local fishFrame
+        for f in pairs(eventFrames["PLAYER_LOGOUT"] or {}) do
+            if eventFrames["UNIT_SPELLCAST_CHANNEL_STOP"] and eventFrames["UNIT_SPELLCAST_CHANNEL_STOP"][f] then fishFrame = f end
+        end
+        assert(fishFrame, "the fishing code does not listen to PLAYER_LOGOUT")
+        fishFrame.__scripts.OnEvent(fishFrame, "PLAYER_LOGOUT")
+        Quiet("a /reload in a fight")
+        assert(ns.db.fishingCVars and ns.db.fishingCVars.SoftTargetInteract, "a /reload in a fight: the list of what to put back is gone")
+        ns.SetQuestMode(false) advance(1)
+        Fight(false)
+        assert(Is(YOURS) and ns.db.fishingCVars == nil, "after that fight your settings are not back")
+        assert(blocked == 0, "SetCVar was called in combat " .. blocked .. " times")
+    end)
+    fighting = false
+    ns.SetQuestMode(false)
+    fire("PLAYER_REGEN_ENABLED") advance(1)
+    GetCVar, SetCVar, SetOverrideBinding, ClearOverrideBindings, InCombatLockdown = saved.get, saved.set, saved.set2, saved.clear, saved.combat
+    ns.db.gatherMark, ns.db.gatherKey, ns.db.fishingCVars, ns.db.fishMarkBobber, ns.db.fishLoudSplash = saved.mark, saved.key, saved.cvars, saved.bobber, saved.loud
+    if ns.StopFishing then ns.StopFishing() end
+    player.map, player.x, player.y = saved.map, saved.x, saved.y
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
