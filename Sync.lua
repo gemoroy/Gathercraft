@@ -52,6 +52,7 @@ local QUERY_HEARD = 120       -- someone else asked for the zone this recently: 
 local QUERY_JITTER = 15       -- seconds: wait a random moment before asking (others may ask first)
 local MAX_RESPONDERS = 3
 local ANSWER_WAIT_MIN, ANSWER_WAIT_MAX = 2, 15 -- seconds: the random wait before an answer starts
+local ANSWER_HOLD = 4        -- seconds an answer waits that was not among the first: do the first go on? (see AnswerStops)
 local ANSWER_MORE_SHARE = 0.2 -- a zone question is answered only with this much more than the asker knows ...
 local ANSWER_MORE_NODES = 20  -- ... and at least this many nodes more (see WorthAnswering)
 local ANSWER_MIN_NODES = 2    -- ... and never fewer than this many, in all and more than the asker knows
@@ -140,8 +141,10 @@ local function Perf()
         b, what = perf.cur, ("running minute, %d s"):format(GetTime() % 60)
     end
     local kb = PerfMemory()
-    ns.Print(("perf (%s): sync messages in %d, out %d; nodes read %d; refused: %d messages over the budget, %d nodes over the limit per player; other addons' messages %d; sync code %.1f ms; %s"):format(
-        what, b.msgIn, b.msgOut, b.nodes, b.overBudget, b.overLimit, b.other, b.ms,
+    -- (own messages heard back: since login - does this realm send our own
+    -- messages back to us? AnswerStops counts on it and has a rule without it)
+    ns.Print(("perf (%s): sync messages in %d, out %d; nodes read %d; refused: %d messages over the budget, %d nodes over the limit per player; other addons' messages %d; sync code %.1f ms; own messages heard back %d of %d since login; %s"):format(
+        what, b.msgIn, b.msgOut, b.nodes, b.overBudget, b.overLimit, b.other, b.ms, perf.back or 0, perf.sent or 0,
         kb and ("memory %.1f MB"):format(kb / 1024) or "memory not readable in this client"))
 end
 
@@ -211,30 +214,104 @@ end
 --   Who goes on? The first MAX_RESPONDERS in the channel. The channel hands
 -- everyone the messages in one order, so each player can tell his place: the
 -- others' answers he heard before his own first packet came back to him.
--- After that nothing is counted any more (`closed`): whoever comes later
--- stops himself. Should the own packet never come back, the count closes
--- with the second packet.
---   Returns true when this packet must not be sent.
-local function AnswerStops(a)
-    if not a.stopped and a.ahead >= MAX_RESPONDERS then
-        a.stopped = true
-        if answering[a.mapID] == a then answering[a.mapID] = nil end
-        stats.answersStopped = (stats.answersStopped or 0) + 1
-        Debug(("stopped answering zone %d after %d of %d packets: %d others were first"):format(a.mapID, a.sent, a.packets, a.ahead))
+-- After that nothing is counted any more (`closed`).
+--   That alone is not safe (R1 S-M1; Codex, 13.11.2026): where the own
+-- packet does not come back, or comes back later than the others' packets,
+-- eight players who started together each counted three ahead of them and
+-- all stopped - no answer. A first packet says nothing about whether its
+-- sender goes on. So nobody stops for good because of first packets:
+--   - Three were ahead when our packet came back: we give way and hold the
+--     rest for ANSWER_HOLD seconds. Those who are truly first send their
+--     second packet in that time (`went`: others past their first packet).
+--     Three of them: we stop. Fewer: we go on after all.
+--   - Our packet is not back when the second one is due: it goes out.
+--   - Whoever goes on without a known place (`byName`) stops only when
+--     three others who went past their first packet too come before him by
+--     name (`before`). A late echo changes nothing any more.
+-- Past the first packet one stops only for players who are past theirs, and
+-- of those the one whose name comes first never stops: one answer always
+-- arrives. With everybody's echo in order it is the first three and nobody
+-- else sends a second packet; with nobody's it is the three first names,
+-- and the others stop after their second packet; where it is mixed, one or
+-- two more may go on - rather an answer more than none.
+--   Returns true when this packet must not be sent (now).
+local AnswerHoldOver
+
+local function AnswerStopped(a, why)
+    a.stopped, a.held = true, nil
+    if answering[a.mapID] == a then answering[a.mapID] = nil end
+    stats.answersStopped = (stats.answersStopped or 0) + 1
+    Debug(("stopped answering zone %d after %d of %d packets: %s"):format(a.mapID, a.sent, a.packets, why))
+end
+
+local function AnswerStops(a, item)
+    if a.stopped then return true end
+    if a.byName then
+        if a.before >= MAX_RESPONDERS then
+            AnswerStopped(a, a.before .. " others who went on come first by name")
+        end
+    elseif a.sent == 0 then
+        -- (not started yet: as many answers as are wanted are on their way)
+        if a.ahead >= MAX_RESPONDERS then AnswerStopped(a, a.ahead .. " others were first") end
+    elseif a.sent == 1 and a.closed and a.ahead >= MAX_RESPONDERS then
+        -- our place is known and it is not among the first: give way, and see whether they go on
+        a.holding, a.held = true, { item }
+        for i = #queue, 1, -1 do
+            if queue[i].answer == a then table.insert(a.held, 2, table.remove(queue, i)) end
+        end
+        Debug(("answer to zone %d: %d others were first - waiting %d s to see whether they go on"):format(a.mapID, a.ahead, ANSWER_HOLD))
+        C_Timer.After(ANSWER_HOLD, function() AnswerHoldOver(a) end)
+        return true
     end
     return a.stopped
 end
 
+AnswerHoldOver = function(a)
+    if a.stopped or not a.holding then return end
+    a.holding = nil
+    if a.went >= MAX_RESPONDERS then
+        AnswerStopped(a, a.went .. " others were first and went on")
+        return
+    end
+    -- too few of them went on: this answer is wanted after all
+    a.byName = true
+    for i, item in ipairs(a.held or {}) do table.insert(queue, i, item) end
+    a.held = nil
+    Debug(("answer to zone %d: only %d of the %d who were first went on - going on, names decide"):format(a.mapID, a.went, a.ahead))
+end
+
 local function AnswerSent(a, text)
     a.sent = a.sent + 1
-    if a.sent == 1 then a.first = text else a.closed = true end
+    if a.sent == 1 then
+        a.first = text
+    elseif not a.closed then
+        a.closed, a.byName = true, true
+        Debug(("answer to zone %d: our first packet is not back - going on, names decide"):format(a.mapID))
+    end
     if a.sent >= a.packets and answering[a.mapID] == a then answering[a.mapID] = nil end
 end
 
--- Our own first packet came back from the channel: our place is known
+-- Our own first packet came back from the channel in time: our place is known
 local function AnswerEcho(text)
     for _, a in pairs(answering) do
-        if a.first == text then a.closed = true end
+        if a.first == text and not a.closed then a.closed = true end
+    end
+end
+
+-- Somebody's nodes for a zone we are answering ourselves: an answer of his
+-- (two nodes or more in his first message - one node is a harvest), and
+-- with a second message he went past his first packet
+local function AnswerHeard(a, sender, nodes)
+    local seen = a.responders[sender]
+    if not seen then
+        if nodes < ANSWER_MIN_NODES then return end
+        a.responders[sender] = 1
+        if not a.closed then a.ahead = a.ahead + 1 end
+    elseif seen == 1 then
+        a.responders[sender] = 2
+        a.went = a.went + 1
+        local me = ns.Readable(UnitName("player"), "sync")
+        if me and ShortName(sender) < me then a.before = a.before + 1 end
     end
 end
 
@@ -243,6 +320,7 @@ end
 local function Send(...)
     local cur = PerfNow()
     cur.msgOut = cur.msgOut + 1
+    perf.sent = (perf.sent or 0) + 1
     local fine, result = pcall(C_ChatInfo.SendAddonMessage, ...)
     if fine then return result end
     return false, result
@@ -254,7 +332,7 @@ local function SendNext()
         -- (the packets of a stopped answer cost no turn: what waits behind them goes out now)
         item = table.remove(queue, 1)
         if not item then return end
-    until not (item.answer and AnswerStops(item.answer))
+    until not (item.answer and AnswerStops(item.answer, item))
     local ok, err
     if item.target == "GUILD" then
         if IsInGuild() then
@@ -684,10 +762,7 @@ local function OnNodes(body, sender, trusted, dry)
     -- not to the end (see AnswerStops). A harvest somebody shares is one node
     -- in a message - that is no answer.
     local a = answering[mapID]
-    if a and not dry and not a.closed and #parts - 1 >= 2 and not a.responders[sender] then
-        a.responders[sender] = true
-        a.ahead = a.ahead + 1
-    end
+    if a and not dry then AnswerHeard(a, sender, #parts - 1) end
     for i = 2, #parts do
         HandleNode(mapID, parts[i], sender, trusted, dry)
     end
@@ -744,7 +819,7 @@ local function OnQuery(body, sender, distribution)
     -- Wait a random moment; if enough others answer first, stay quiet. The
     -- answer is kept in `answering` until its last packet is out: the others'
     -- answers are counted for it up to the moment our place is known.
-    local a = { mapID = mapID, responders = {}, ahead = 0, sent = 0, packets = 0 }
+    local a = { mapID = mapID, responders = {}, ahead = 0, went = 0, before = 0, sent = 0, packets = 0 }
     answering[mapID] = a
     C_Timer.After(ANSWER_WAIT_MIN + math.random() * (ANSWER_WAIT_MAX - ANSWER_WAIT_MIN), function()
         if a.ahead >= MAX_RESPONDERS then
@@ -796,6 +871,7 @@ local function Receive(prefix, text, distribution, sender, dry)
     if not dry then
         -- our own messages come back from the channel: not worth a debug line
         if IsSelf(sender) or LearnSelf(sender, text) then
+            perf.back = (perf.back or 0) + 1
             AnswerEcho(text)
             return
         end

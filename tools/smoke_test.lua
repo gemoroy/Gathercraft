@@ -8616,11 +8616,14 @@ step("Sharing: an answer stops when three others answered first, also in the mid
         local _, nodes = S22Sent(1522, from)
         assert(nodes == 100, "three harvests in the zone, and the answer had " .. nodes .. " nodes, want 100")
 
-        -- three others were ahead of us in the channel (heard before our first packet came back): we stop
+        -- three others were ahead of us in the channel (heard before our first packet came back)
+        -- and go on with their second packet: we stop
         from = Start(1523)
         local first = First(1523, from)
         for k = 1, 3 do S22Other(1523, "Ahead" .. k .. "-Realm", 8) end
         S22Msg(first, me)
+        advance(1.5)
+        for k = 1, 3 do S22Other(1523, "Ahead" .. k .. "-Realm", 8) end
         advance(60)
         local messages = S22Sent(1523, from)
         assert(messages == 1, "three others were ahead, and we sent " .. messages .. " packets, want 1")
@@ -8648,13 +8651,14 @@ step("Sharing: an answer stops when three others answered first, also in the mid
         _, nodes = S22Sent(1525, from)
         assert(nodes == 100, "two players with many packets stopped our answer (" .. nodes .. " of 100 nodes)")
 
-        -- our own packet never comes back (it can be lost): what was heard up to our second packet counts
+        -- our own packet never comes back (it can be lost): first packets of others stop nobody then
+        -- (R1 S-M1 - the rule without the echo has a step of its own further down)
         from = Start(1526)
         First(1526, from)
         for k = 1, 3 do S22Other(1526, "Ahead" .. k .. "-Realm", 8) end
         advance(60)
-        messages = S22Sent(1526, from)
-        assert(messages == 1, "no echo, three others right after our first packet: " .. messages .. " packets, want 1")
+        _, nodes = S22Sent(1526, from)
+        assert(nodes == 100, "no echo, three others with one packet each right after our first: " .. nodes .. " of 100 nodes")
         from = Start(1527)
         First(1527, from)
         advance(1)
@@ -8665,7 +8669,7 @@ step("Sharing: an answer stops when three others answered first, also in the mid
         _, nodes = S22Sent(1527, from)
         assert(nodes == 100, "no echo, three others after our second packet: " .. nodes .. " of 100 nodes")
 
-        -- a stopped answer leaves nothing behind in the queue: a harvest goes out at once
+        -- an answer that gives way leaves nothing in the queue meanwhile: a harvest goes out at once
         from = Start(1528)
         first = First(1528, from)
         for k = 1, 3 do S22Other(1528, "Ahead" .. k .. "-Realm", 8) end
@@ -8678,7 +8682,7 @@ step("Sharing: an answer stops when three others answered first, also in the mid
         local shared = false
         for i = before + 1, #sentMessages do if sentMessages[i]:find("^N:1412;o1619,") then shared = true end end
         for i, n in ipairs(ns.db.nodes[1412]) do if n == node then table.remove(ns.db.nodes[1412], i) break end end
-        assert(shared, "after a stopped answer the own harvest waited behind its packets")
+        assert(shared, "while an answer gave way the own harvest waited behind its packets")
 
         -- the wait is spread over 2 to 15 seconds
         local realRandom = math.random
@@ -9911,6 +9915,231 @@ step("Sharing: an answer has two nodes at least, and two more than the asker kno
     for _, mapID in ipairs(zones) do ns.db.nodes[mapID] = nil end
     ns.NotifyNodesChanged()
     if not saved then slash("sync off") end
+    if not ok then error(err, 0) end
+end)
+step("Sharing: when our own packet does not come back in time, we go on - and stop only for three who went on too and come first by name (v0.1.22 R1 S-M1)", function()
+    -- Codex, 13.11.2026 (S-M1): eight players who know the same 120 nodes
+    -- start at the same moment, and nobody hears his own packet. Each heard
+    -- three others before his second packet and stopped: 8 packets, 9 of 120
+    -- nodes learned, no answer. The rule without the own packet back in time:
+    --   - the second packet goes out anyway;
+    --   - from then on we stop only when three OTHERS who went past their
+    --     first packet too come before us by name. Who only sent one packet
+    --     stops nobody - he may have stopped himself.
+    -- The one whose name comes first never stops, so one answer always arrives.
+    -- And with the own packet back in time, three ahead of us are no reason to
+    -- stop for good either: we wait four seconds for their second packets.
+    local saved = ns.db.sync.enabled
+    slash("sync on")
+    fire("PLAYER_LOGIN")
+    advance(700)
+    local me = UnitName("player")
+    assert(me == "Test Player", "test setup: the names below are chosen around \"Test Player\", this is " .. tostring(me))
+    local zones = {}
+    local function Start(mapID)
+        zones[#zones + 1] = mapID
+        S22Zone(mapID, 100)
+        local from = #sentMessages
+        S22Msg(("Q:%d:0"):format(mapID), "Asker-Realm")
+        return from
+    end
+    -- until `count` of our packets are out
+    local function Packets(mapID, from, count)
+        for _ = 1, 300 do
+            local messages, _, first = S22Sent(mapID, from)
+            if messages >= count then return first end
+            advance(0.2)
+        end
+        error("zone " .. mapID .. ": our packet " .. count .. " never went out", 0)
+    end
+    local function Rest(mapID, from)
+        advance(60)
+        local messages, nodes = S22Sent(mapID, from)
+        return messages, nodes
+    end
+    local ok, err = pcall(function()
+        -- three others answer right after our first packet and then stop (as all eight did): we finish
+        local from = Start(1601)
+        Packets(1601, from, 1)
+        for k = 1, 3 do S22Other(1601, "Ahead" .. k .. "-Realm", 8) end
+        local messages, nodes = Rest(1601, from)
+        assert(nodes == 100, ("no echo, three others sent one packet each: we sent %d packets with %d of 100 nodes"):format(messages, nodes))
+
+        -- three others go on (a second packet each) and come before us by name: we stop after our second packet
+        from = Start(1602)
+        Packets(1602, from, 1)
+        for k = 1, 3 do S22Other(1602, "Ahead" .. k .. "-Realm", 8) end
+        for k = 1, 3 do S22Other(1602, "Ahead" .. k .. "-Realm", 8) end
+        messages = Rest(1602, from)
+        assert(messages == 2, "no echo, three who went on come first by name: " .. messages .. " packets, want 2")
+        -- ... and that question is not answered again right away
+        S22Msg("Q:1602:0", "Asker Two-Realm")
+        advance(60)
+        assert(S22Sent(1602, from) == 2, "a stopped answer was started again within the five minutes")
+
+        -- the same three with names after ours: they stop for us, not we for them
+        from = Start(1603)
+        Packets(1603, from, 1)
+        for _ = 1, 2 do for k = 1, 3 do S22Other(1603, "Zed" .. k .. "-Realm", 8) end end
+        messages, nodes = Rest(1603, from)
+        assert(nodes == 100, "no echo, three who went on come after us by name: " .. nodes .. " of 100 nodes")
+
+        -- two before us and five after us: we are the third
+        from = Start(1604)
+        Packets(1604, from, 1)
+        for _ = 1, 2 do
+            for k = 1, 2 do S22Other(1604, "Ahead" .. k .. "-Realm", 8) end
+            for k = 1, 5 do S22Other(1604, "Zed" .. k .. "-Realm", 8) end
+        end
+        messages, nodes = Rest(1604, from)
+        assert(nodes == 100, "no echo, two who went on before us by name: " .. nodes .. " of 100 nodes")
+
+        -- one player with many packets is one player
+        from = Start(1605)
+        Packets(1605, from, 1)
+        for _ = 1, 5 do S22Other(1605, "Ahead1-Realm", 8) S22Other(1605, "Ahead2-Realm", 8) end
+        messages, nodes = Rest(1605, from)
+        assert(nodes == 100, "no echo, two players with five packets each stopped us (" .. nodes .. " of 100 nodes)")
+
+        -- a second packet may be a short one (the rest of a small answer): it still tells that he went on
+        from = Start(1606)
+        Packets(1606, from, 1)
+        for k = 1, 3 do S22Other(1606, "Ahead" .. k .. "-Realm", 8) end
+        for k = 1, 3 do S22Other(1606, "Ahead" .. k .. "-Realm", 1) end
+        messages = Rest(1606, from)
+        assert(messages == 2, "no echo, three went on with a short second packet: " .. messages .. " packets, want 2")
+        -- ... but a single node from somebody who never answered is a harvest
+        from = Start(1607)
+        Packets(1607, from, 1)
+        for _ = 1, 2 do for k = 1, 3 do S22Other(1607, "Ahead" .. k .. "-Realm", 1) end end
+        messages, nodes = Rest(1607, from)
+        assert(nodes == 100, "no echo, three players with two harvests each stopped us (" .. nodes .. " of 100 nodes)")
+
+        -- they go on later, when we are in the middle: we stop then
+        from = Start(1608)
+        Packets(1608, from, 1)
+        for k = 1, 3 do S22Other(1608, "Ahead" .. k .. "-Realm", 8) end
+        Packets(1608, from, 5)
+        for k = 1, 3 do S22Other(1608, "Ahead" .. k .. "-Realm", 8) end
+        messages = Rest(1608, from)
+        assert(messages >= 5 and messages <= 6, "no echo, three went on after our fifth packet: " .. messages .. " packets, want 5 or 6")
+
+        -- the echo comes late, after our second packet: it changes nothing any more
+        -- (three first packets were ahead of ours in the channel - their senders may all have stopped)
+        from = Start(1609)
+        local first = Packets(1609, from, 1)
+        for k = 1, 3 do S22Other(1609, "Ahead" .. k .. "-Realm", 8) end
+        Packets(1609, from, 2)
+        S22Msg(first, me)
+        messages, nodes = Rest(1609, from)
+        assert(nodes == 100, "a late echo with three first packets ahead stopped us (" .. nodes .. " of 100 nodes)")
+        -- ... and a late echo does not put us out of reach of the rule either
+        from = Start(1610)
+        first = Packets(1610, from, 1)
+        Packets(1610, from, 2)
+        S22Msg(first, me)
+        for _ = 1, 2 do for k = 1, 3 do S22Other(1610, "Ahead" .. k .. "-Realm", 8) end end
+        messages = Rest(1610, from)
+        assert(messages >= 2 and messages <= 3, "a late echo, then three who went on come first by name: " .. messages .. " packets, want 2 or 3")
+
+        -- with the echo in time everything is as it was: our place in the channel counts, names do not
+        from = Start(1611)
+        first = Packets(1611, from, 1)
+        for k = 1, 2 do S22Other(1611, "Ahead" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        for _ = 1, 3 do for k = 1, 6 do S22Other(1611, "Ahead" .. k .. "-Realm", 8) end end
+        messages, nodes = Rest(1611, from)
+        assert(nodes == 100, "echo in time, two ahead, six who go on behind us: " .. nodes .. " of 100 nodes")
+        from = Start(1612)
+        first = Packets(1612, from, 1)
+        for k = 1, 3 do S22Other(1612, "Zed" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        advance(1.5)
+        for k = 1, 3 do S22Other(1612, "Zed" .. k .. "-Realm", 8) end
+        messages = Rest(1612, from)
+        assert(messages == 1, "echo in time, three ahead (names after ours) who go on: " .. messages .. " packets, want 1")
+
+        -- three were ahead when our packet came back, but they do not go on (each may have counted
+        -- three ahead of himself - the echo came later than the others' packets): we waited, now we go on
+        from = Start(1613)
+        first = Packets(1613, from, 1)
+        for k = 1, 3 do S22Other(1613, "Ahead" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        advance(3)
+        assert(S22Sent(1613, from) == 1, "three were ahead: we did not wait to see whether they go on")
+        messages, nodes = Rest(1613, from)
+        assert(nodes == 100, ("three were ahead and none went on: we sent %d packets with %d of 100 nodes"):format(messages, nodes))
+        -- ... two of the three go on: still fewer than three answers, so ours is wanted
+        from = Start(1614)
+        first = Packets(1614, from, 1)
+        for k = 1, 3 do S22Other(1614, "Ahead" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        advance(1.5)
+        for k = 1, 2 do S22Other(1614, "Ahead" .. k .. "-Realm", 8) end
+        messages, nodes = Rest(1614, from)
+        assert(nodes == 100, "three were ahead, two went on: " .. nodes .. " of 100 nodes")
+        -- ... and when the third goes on after all while we are at it, the names decide: he comes first
+        from = Start(1615)
+        first = Packets(1615, from, 1)
+        for k = 1, 3 do S22Other(1615, "Ahead" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        advance(1.5)
+        for k = 1, 2 do S22Other(1615, "Ahead" .. k .. "-Realm", 8) end
+        Packets(1615, from, 4)
+        S22Other(1615, "Ahead3-Realm", 8)
+        messages = Rest(1615, from)
+        assert(messages >= 4 and messages <= 5, "three before us by name went on in the end: " .. messages .. " packets, want 4 or 5")
+        -- while an answer waits, a harvest goes out at once, and a second question for the zone starts nothing
+        from = Start(1616)
+        first = Packets(1616, from, 1)
+        for k = 1, 3 do S22Other(1616, "Ahead" .. k .. "-Realm", 8) end
+        S22Msg(first, me)
+        advance(1.3)
+        S22Msg("Q:1616:0", "Asker Three-Realm")
+        local harvest = { id = "o1619", name = "Silverleaf", type = "herb", x = 0.32, y = 0.61, count = 1, last = time() }
+        table.insert(ns.db.nodes[1412], harvest)
+        local mark = #sentMessages
+        ns.SyncShare(1412, harvest)
+        advance(1.3)
+        local out = false
+        for i = mark + 1, #sentMessages do if sentMessages[i]:find("^N:1412;o1619,") then out = true end end
+        for i, n in ipairs(ns.db.nodes[1412]) do if n == harvest then table.remove(ns.db.nodes[1412], i) break end end
+        assert(out and S22Sent(1616, from) == 1, "while an answer waited, the own harvest waited behind it (or the answer went on)")
+        messages, nodes = Rest(1616, from)
+        assert(nodes == 100, "after the wait the answer has " .. nodes .. " of 100 nodes (a second question started another, or it was lost)")
+
+        -- /gcr perf tells whether our own messages come back at all (for the live test)
+        local function Echo()
+            local mark = #log
+            slash("perf")
+            for i = mark + 1, #log do
+                local back, sent = log[i]:match("own messages heard back (%d+) of (%d+)")
+                if back then return tonumber(back), tonumber(sent) end
+            end
+            error("/gcr perf does not say how many own messages were heard back", 0)
+        end
+        local back0, sent0 = Echo()
+        local node = { id = "o1619", name = "Silverleaf", type = "herb", x = 0.31, y = 0.62, count = 1, last = time() }
+        table.insert(ns.db.nodes[1412], node)
+        local before = #sentMessages
+        ns.SyncShare(1412, node)
+        advance(5)
+        for i, n in ipairs(ns.db.nodes[1412]) do if n == node then table.remove(ns.db.nodes[1412], i) break end end
+        local out = #sentMessages - before
+        assert(out >= 1, "test setup: the harvest was not sent")
+        local back1, sent1 = Echo()
+        assert(sent1 == sent0 + out and back1 == back0, ("a harvest sent, nothing back: heard back %d of %d, before %d of %d"):format(back1, sent1, back0, sent0))
+        S22Msg(sentMessages[#sentMessages], me)
+        local back2, sent2 = Echo()
+        assert(back2 == back0 + 1 and sent2 == sent1, ("our message came back: heard back %d of %d"):format(back2, sent2))
+        -- somebody else's message is not ours
+        S22Other(1699, "Stranger-Realm", 1)
+        assert(Echo() == back2, "a stranger's message was counted as ours coming back")
+    end)
+    for _, mapID in ipairs(zones) do ns.db.nodes[mapID] = nil end
+    ns.NotifyNodesChanged()
+    if not saved then slash("sync off") end
+    advance(120)
     if not ok then error(err, 0) end
 end)
 -- (end of the v0.1.22 steps)

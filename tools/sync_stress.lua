@@ -3,7 +3,7 @@
 -- Network simulation for Gathercraft's node sharing: loads the addon once per
 -- simulated player (each in its own environment), connects them through a fake
 -- chat server and lets them gather, share and query like real players.
--- Scenarios: fuzz, normal, attack, launch, mega, answers, all (default)
+-- Scenarios: fuzz, normal, attack, launch, mega, answers, echo, all (default)
 local ROOT = arg[1] or "."
 local ONLY = arg[2] or "all"
 local unpack = unpack or table.unpack
@@ -92,10 +92,24 @@ end
 local clients = {}
 local net = { channel = 0, guild = 0, bySecond = {}, perSender = {}, bytes = 0 }
 
-local function deliver(from, prefix, msg, dist)
+-- net.echo: does a player hear his own messages? nil = yes (as the live
+-- realms do), "missing" = never, "late" = net.lateBy seconds after everybody
+-- else; a function (client) may say it per player. Everybody gets the
+-- messages in one order - the order they were sent in when net.latency is a
+-- fixed time.
+local function EchoMode(c)
+    local mode = net.echo
+    if type(mode) == "function" then mode = mode(c) end
+    return mode
+end
+
+local function deliver(from, prefix, msg, dist, onlyOwn)
     for _, c in ipairs(clients) do
         if c.online and (dist == "CHANNEL" or (dist == "GUILD" and c.guild and c.guild == from.guild)) then
-            c.fire("CHAT_MSG_ADDON", prefix, msg, dist, from.fullName)
+            local own = c == from
+            if (onlyOwn and own) or (not onlyOwn and not (own and EchoMode(c))) then
+                c.fire("CHAT_MSG_ADDON", prefix, msg, dist, from.fullName)
+            end
         end
     end
 end
@@ -121,9 +135,17 @@ local function serverSend(from, prefix, msg, dist)
     local ps = net.perSender[from.name] or { times = {} }
     net.perSender[from.name] = ps
     ps.times[#ps.times + 1] = NOW
-    hpush({ at = NOW + 0.05 + math.random() * 0.2, fn = function() deliver(from, prefix, msg, dist) end })
+    local after = net.latency or (0.05 + math.random() * 0.2)
+    hpush({ at = NOW + after, fn = function() deliver(from, prefix, msg, dist) end })
+    if EchoMode(from) == "late" then
+        hpush({ at = NOW + after + (net.lateBy or 5), fn = function() deliver(from, prefix, msg, dist, true) end })
+    end
     return 0
 end
+
+-- The addon's own dice (its waits before asking and answering): a scenario
+-- may fix them, so that every player waits the same time
+local addonRandom
 
 ---------------------------------------------------------------------------
 -- One simulated player = one addon instance in its own environment
@@ -138,6 +160,10 @@ local function NewClient(name, guild)
     local eventFrames = {}
 
     E.unpack = unpack
+    E.math = setmetatable({ random = function(...)
+        if addonRandom then return addonRandom(...) end
+        return math.random(...)
+    end }, { __index = math })
     E.wipe = function(t) for k in pairs(t) do t[k] = nil end return t end
     E.tinsert = table.insert
     E.strsplit = function(sep, s)
@@ -485,6 +511,7 @@ local function Reset()
     heap = {}
     net = { channel = 0, guild = 0, bySecond = {}, perSender = {}, bytes = 0 }
     freshNodes = {}
+    addonRandom = nil
 end
 
 -- Players log in spread over `spread` seconds, then gather every `every` seconds (random +-50%)
@@ -782,7 +809,96 @@ scenarios.answers = function()
     AnswerCase("One question, 8 who know the same 6 nodes (one packet each), the asker knows nothing", 8, 6, 1, 1, 0, 16)
 end
 
-local order = { "fuzz", "normal", "attack", "launch", "mega", "mega3k", "answers" }
+-- Everybody starts at the same moment, and the own packet does not come back
+-- (R1 S-M1; Codex, 13.11.2026, "echo-missing-ordered": 8 players who know the
+-- same 120 nodes each sent one packet, heard three others before the second
+-- and stopped - 8 messages, 9 of 120 nodes learned). `knowers` players log
+-- in in the same instant (their send tickers tick together), know the same
+-- `world` nodes and wait the same time before they answer; every message
+-- reaches everybody 0.1 s after it was sent, in the order it was sent.
+--   echo: nil = everybody hears himself, "missing", "late" (5 s after the
+-- others), or "mixed" (every second player hears himself, the others never).
+-- Checked: one complete answer at least, three at most; with everybody alike
+-- (no mix) the asker has everything afterwards. (An answer of two packets
+-- cannot be held back where nobody hears himself - the second packet is the
+-- one that goes out anyway. That case is printed, with what it costs.)
+local function EchoCase(title, knowers, world, echo, lateBy)
+    Reset()
+    math.randomseed(21)
+    MakeFreshNodes(world)
+    for i, s in ipairs(freshNodes) do s.id = 7000000 + i end
+    net.latency, net.lateBy = 0.1, lateBy
+    addonRandom = function(a, b) if a then return b and math.floor((a + b) / 2) or a end return 0.5 end
+    for i = 1, knowers do
+        local c = NewClient("K" .. i, nil)
+        clients[#clients + 1] = c
+        Login(c)
+    end
+    runUntil(NOW + 20 * 60)
+    for _, c in ipairs(clients) do
+        local list = {}
+        c.ns.db.nodes[ZONE] = list
+        for _, s in ipairs(freshNodes) do
+            list[#list + 1] = { id = "o" .. s.id, type = s.type, x = s.x, y = s.y, name = s.name, item = s.item, count = 1 }
+        end
+        c.ns.NotifyNodesChanged()
+    end
+    if echo == "mixed" then
+        local without = {}
+        for i, c in ipairs(clients) do if i % 2 == 1 then without[c] = true end end
+        net.echo = function(c) return without[c] and "missing" or nil end
+    else
+        net.echo = echo
+    end
+    net.log = {}
+    local asker = NewClient("Asker", nil)
+    clients[#clients + 1] = asker
+    Login(asker)
+    runUntil(NOW + 180)
+    local packets, nodes, names, messages = {}, {}, {}, 0
+    for _, m in ipairs(net.log) do
+        if m.kind == "N" and m.from ~= "Asker" then
+            if not packets[m.from] then names[#names + 1] = m.from end
+            packets[m.from], nodes[m.from] = (packets[m.from] or 0) + 1, (nodes[m.from] or 0) + m.nodes
+            messages = messages + 1
+        end
+    end
+    local each, complete = {}, 0
+    for i, name in ipairs(names) do
+        each[i] = packets[name]
+        if nodes[name] >= world then complete = complete + 1 end
+    end
+    table.sort(each, function(x, y) return x > y end)
+    local learned = 0
+    for _, s in ipairs(freshNodes) do
+        for _, n in ipairs(asker.ns.db.nodes[ZONE] or {}) do
+            if n.id == "o" .. s.id then learned = learned + 1 break end
+        end
+    end
+    print(("\n=== %s ==="):format(title))
+    print(("  %d players know the same %d nodes and start together; own messages: %s"):format(knowers, world, echo and (echo .. (echo == "late" and (" by " .. (lateBy or 5) .. " s") or "")) or "heard back"))
+    print(("  Answering players: %d   messages: %d   packets of each: %s"):format(#names, messages, #each > 0 and table.concat(each, " ") or "-"))
+    print(("  Complete answers: %d   the asker learned %d of %d"):format(complete, learned, world))
+    if complete < 1 then addError(("%s: no complete answer (%d of %d learned)"):format(title, learned, world)) end
+    local twoPackets = (each[1] or 0) <= 2
+    if complete > 3 and echo ~= "mixed" and not (twoPackets and echo) then addError(("%s: %d complete answers, at most 3 may be"):format(title, complete)) end
+    if messages > 3 * (each[1] or 0) + 2 * #names then addError(("%s: %d messages, more than three answers and two packets of everybody else"):format(title, messages)) end
+    if echo ~= "mixed" and learned < world then addError(("%s: the asker learned %d of %d"):format(title, learned, world)) end
+    return complete, learned, messages
+end
+
+scenarios.echo = function()
+    EchoCase("Echo: 8 start together, everybody hears himself", 8, 120, nil)
+    EchoCase("Echo: 8 start together, nobody hears himself (Codex's echo-missing-ordered)", 8, 120, "missing")
+    EchoCase("Echo: 8 start together, the own message comes 5 s late", 8, 120, "late", 5)
+    EchoCase("Echo: 8 start together, the own message comes 0.9 s late (before the second packet)", 8, 120, "late", 0.9)
+    EchoCase("Echo: 8 start together, every second one never hears himself", 8, 120, "mixed")
+    EchoCase("Echo: 40 start together, nobody hears himself", 40, 120, "missing")
+    EchoCase("Echo: 3 start together, nobody hears himself", 3, 120, "missing")
+    EchoCase("Echo: 8 start together with 12 nodes (two packets), nobody hears himself", 8, 12, "missing")
+end
+
+local order = { "fuzz", "normal", "attack", "launch", "mega", "mega3k", "answers", "echo" }
 for _, name in ipairs(order) do
     if (ONLY == "all" and name ~= "mega3k") or ONLY == name then
         local t0 = os.clock()
