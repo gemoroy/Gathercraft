@@ -9198,13 +9198,15 @@ step("Paths: at most 30,000 pieces, 8,000 a zone - the longest unused go first; 
                 clock = clock + 10 -- (a new start)
                 local y = row * 25 + 12.5
                 Look(300, y)
-                local x = 300
+                local x, madeBefore = 300, made
                 while x < 4700 and made < add do
                     x = x + 12.5
                     local before = ns.PathsPiece(mapID, math.floor(x / 25) - 1, row, 1, 0)
                     Look(x, y)
                     if not before and ns.PathsPiece(mapID, math.floor(x / 25) - 1, row, 1, 0) then made = made + 1 end
                 end
+                -- (said as a failure: a recording that notes nothing must not ride on for ever)
+                assert(made > madeBefore, "a whole row of zone " .. mapID .. " ridden (row " .. row .. ") and no path piece noted")
                 row = row + 1
             end
             return row
