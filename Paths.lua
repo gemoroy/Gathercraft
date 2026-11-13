@@ -19,10 +19,13 @@ local L = ns.L or setmetatable({}, { __index = function(_, k) return k end })
 --       is shorter; such a piece may only go downwards),
 --     - how often you swam on it,
 --     - the day you last used it (the day only, never a time).
---   No trace is kept: not the order of the squares, no times, no names.
+--   No trace is kept: no list of the squares in the order you went, no
+--   times, no names. (What is promised is that much. The pieces lie in a
+--   table; nobody looked at whether the order they are written to the file
+--   in tells anything about the order they were made in.)
 --
---   The client tells no height (UnitPosition gives 0; Sven's probe of
---   12.11.2026), so there is none here.
+--   No height is used. Where it was looked at (Sven's probe of 12.11.2026)
+--   UnitPosition gave 0; that is one place, not a rule about the client.
 ---------------------------------------------------------------------------
 local HBD = LibStub and LibStub("HereBeDragons-2.0", true)
 
