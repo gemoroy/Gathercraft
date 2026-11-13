@@ -45,6 +45,62 @@ local function hpop()
     return top
 end
 
+---------------------------------------------------------------------------
+-- Two streams of random numbers (R1 S-M3; Codex, 13.11.2026)
+--   Everything used one stream: the world (who logs in when, who gathers
+-- what where) and the protocol (how long a message travels, how long the
+-- addon waits before it asks or answers). A change to the addon draws more
+-- or fewer numbers - and with the same seed the players then gathered other
+-- things at other times: "before" and "after" were not the same evening.
+--   Now the world has a stream of its own (wrandom) and the protocol
+-- another (prandom; math.random inside the addon is this one). Every
+-- harvest and login is noted in a checksum that is printed with each
+-- scenario: two runs with the same world print the same line.
+--   (Lehmer's generator, 48271 mod 2^31 - 1: exact in Lua's numbers and the
+-- same on every machine.)
+---------------------------------------------------------------------------
+local function NewRandom()
+    local state = 1
+    local function nextFloat()
+        state = (state * 48271) % 2147483647
+        return (state - 1) / 2147483646
+    end
+    local function random(a, b)
+        local r = nextFloat()
+        if not a then return r end
+        if not b then a, b = 1, a end
+        return a + math.floor(r * (b - a + 1))
+    end
+    local function seed(n)
+        state = (n * 2654435 + 12345) % 2147483646 + 1
+        for _ = 1, 10 do nextFloat() end
+    end
+    return random, seed
+end
+local wrandom, wseed = NewRandom()
+local prandom, pseed = NewRandom()
+local function Seed(n)
+    wseed(n)
+    pseed(n + 7919)
+end
+Seed(0)
+
+-- What the world did to the players: harvests and logins, in a checksum
+local trace = { harvests = 0, logins = 0, sum = 0 }
+local function Trace(kind, ...)
+    trace[kind] = trace[kind] + 1
+    local sum = (trace.sum * 31 + (kind == "harvests" and 1 or 2)) % 2147483647
+    for i = 1, select("#", ...) do
+        local v = select(i, ...)
+        if type(v) == "string" then
+            for k = 1, #v do sum = (sum * 31 + v:byte(k)) % 2147483647 end
+        else
+            sum = (sum * 31 + math.floor(v)) % 2147483647
+        end
+    end
+    trace.sum = sum
+end
+
 local errors = {}
 local function addError(e)
     if #errors < 50 then errors[#errors + 1] = e end
@@ -135,7 +191,7 @@ local function serverSend(from, prefix, msg, dist)
     local ps = net.perSender[from.name] or { times = {} }
     net.perSender[from.name] = ps
     ps.times[#ps.times + 1] = NOW
-    local after = net.latency or (0.05 + math.random() * 0.2)
+    local after = net.latency or (0.05 + prandom() * 0.2)
     hpush({ at = NOW + after, fn = function() deliver(from, prefix, msg, dist) end })
     if EchoMode(from) == "late" then
         hpush({ at = NOW + after + (net.lateBy or 5), fn = function() deliver(from, prefix, msg, dist, true) end })
@@ -162,7 +218,7 @@ local function NewClient(name, guild)
     E.unpack = unpack
     E.math = setmetatable({ random = function(...)
         if addonRandom then return addonRandom(...) end
-        return math.random(...)
+        return prandom(...)
     end }, { __index = math })
     E.wipe = function(t) for k in pairs(t) do t[k] = nil end return t end
     E.tinsert = table.insert
@@ -390,6 +446,7 @@ end
 
 local function Login(c)
     c.online = true
+    Trace("logins", NOW * 1000, c.name)
     c.fire("ADDON_LOADED", "Gathercraft")
     c.fire("PLAYER_LOGIN")
     c.fire("PLAYER_ENTERING_WORLD")
@@ -405,7 +462,7 @@ local function MakeFreshNodes(n)
     for i = 1, n do
         local herb = i % 2 == 0
         freshNodes[i] = {
-            id = 7000000 + (i % 12), x = 0.2 + math.random() * 0.6, y = 0.2 + math.random() * 0.6,
+            id = 7000000 + (i % 12), x = 0.2 + wrandom() * 0.6, y = 0.2 + wrandom() * 0.6,
             type = herb and "herb" or "ore", name = (herb and "Forever Herb " or "Forever Ore ") .. (i % 12), item = herb and 2447 or 2770,
             gathered = false,
         }
@@ -415,9 +472,10 @@ end
 local spawnCounter = 0
 local function Gather(c, spot)
     local p = c.player
-    p.x = spot.x + (math.random() - 0.5) * 0.0006
-    p.y = spot.y + (math.random() - 0.5) * 0.0006
+    p.x = spot.x + (wrandom() - 0.5) * 0.0006
+    p.y = spot.y + (wrandom() - 0.5) * 0.0006
     spawnCounter = spawnCounter + 1
+    Trace("harvests", NOW * 1000, c.name, spot.id, p.x * 1000000, p.y * 1000000)
     local spell = spot.type == "herb" and 2366 or 2575
     local cast = "cast" .. spawnCounter
     c.fire("UNIT_SPELLCAST_SENT", "player", spot.name, cast, spell)
@@ -520,26 +578,26 @@ local function Populate(count, spread, every, freshShare)
         local guild = (i % 4 ~= 0) and ("G" .. math.floor(i / 10)) or nil
         local c = NewClient("P" .. i, guild)
         clients[#clients + 1] = c
-        hpush({ at = NOW + math.random() * spread, fn = function()
+        hpush({ at = NOW + wrandom() * spread, fn = function()
             Login(c)
             -- GC_ROUTEQ=1: everyone starts a farm run through 3 other zones
             -- right after login (the route asks for those zones too)
             if os.getenv("GC_ROUTEQ") and c.ns.SyncQueryRouteZones then
                 local zones = {}
-                for _ = 1, 3 do zones[#zones + 1] = 1415 + math.random(0, 9) end
+                for _ = 1, 3 do zones[#zones + 1] = 1415 + wrandom(0, 9) end
                 hpush({ at = NOW + 5, fn = function() c.ns.SyncQueryRouteZones(zones) end })
             end
             local function nextGather()
                 local spot
-                if math.random() < freshShare then
-                    spot = freshNodes[math.random(#freshNodes)]
+                if wrandom() < freshShare then
+                    spot = freshNodes[wrandom(#freshNodes)]
                 else
-                    spot = questieSpots[math.random(#questieSpots)]
+                    spot = questieSpots[wrandom(#questieSpots)]
                 end
                 Gather(c, spot)
-                hpush({ at = NOW + every * (0.5 + math.random()), fn = nextGather })
+                hpush({ at = NOW + every * (0.5 + wrandom()), fn = nextGather })
             end
-            hpush({ at = NOW + 15 + math.random() * every, fn = nextGather })
+            hpush({ at = NOW + 15 + wrandom() * every, fn = nextGather })
         end })
     end
 end
@@ -551,7 +609,7 @@ local scenarios = {}
 
 scenarios.normal = function()
     Reset()
-    math.randomseed(1)
+    Seed(1)
     MakeFreshNodes(60)
     Populate(40, 120, 60, 0.3)
     runUntil(NOW + 25 * 60)
@@ -578,7 +636,7 @@ end
 
 scenarios.launch = function()
     Reset()
-    math.randomseed(2)
+    Seed(2)
     MakeFreshNodes(120)
     Populate(250, 60, 25, 0.3)
     runUntil(NOW + 10 * 60)
@@ -587,7 +645,7 @@ end
 
 scenarios.mega = function()
     Reset()
-    math.randomseed(5)
+    Seed(5)
     MakeFreshNodes(150)
     Populate(800, 120, 25, 0.3)
     runUntil(NOW + 5 * 60)
@@ -597,7 +655,7 @@ end
 -- Forever megaserver: one channel for a whole ruleset (run on its own: slow)
 scenarios.mega3k = function()
     Reset()
-    math.randomseed(7)
+    Seed(7)
     MakeFreshNodes(200)
     Populate(tonumber(os.getenv("GC_PLAYERS") or "") or 3000, 180, 25, 0.3)
     runUntil(NOW + 5 * 60)
@@ -606,7 +664,7 @@ end
 
 scenarios.attack = function()
     Reset()
-    math.randomseed(3)
+    Seed(3)
     MakeFreshNodes(40)
     Populate(30, 30, 60, 0.3)
     runUntil(NOW + 60)
@@ -624,7 +682,7 @@ scenarios.attack = function()
         for k = 1, count do
             local id = 8000000 + seed * 10 + k
             fakeIds[id] = true
-            parts[k] = ("o%d,h,%d,%d,2447"):format(id, math.random(1000, 9000), math.random(1000, 9000))
+            parts[k] = ("o%d,h,%d,%d,2447"):format(id, wrandom(1000, 9000), wrandom(1000, 9000))
         end
         return "N:" .. ZONE .. ";" .. table.concat(parts, ";")
     end
@@ -665,7 +723,7 @@ end
 
 scenarios.fuzz = function()
     Reset()
-    math.randomseed(4)
+    Seed(4)
     Populate(3, 1, 60, 0)
     runUntil(NOW + 20)
     local evil = { name = "Fuzzer", fullName = "Fuzzer-Forever" }
@@ -679,8 +737,8 @@ scenarios.fuzz = function()
     }
     for i = 1, 200 do
         local s = {}
-        for k = 1, math.random(1, 80) do s[k] = string.char(math.random(32, 126)) end
-        samples[#samples + 1] = (math.random() < 0.5 and "N:1412;" or "") .. table.concat(s)
+        for k = 1, wrandom(1, 80) do s[k] = string.char(wrandom(32, 126)) end
+        samples[#samples + 1] = (wrandom() < 0.5 and "N:1412;" or "") .. table.concat(s)
     end
     for i, msg in ipairs(samples) do
         hpush({ at = NOW + i * 0.3, fn = function() deliver(evil, "Gathercraft", msg, "CHANNEL") end })
@@ -698,7 +756,7 @@ end
 --   GC_ANSWERS="knowers,world,share from,share to,asked" changes the case.
 local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed)
     Reset()
-    math.randomseed(seed)
+    Seed(seed)
     MakeFreshNodes(world)
     for i, s in ipairs(freshNodes) do s.id = 7000000 + i end -- (each its own object: none merges with another)
     local function Teach(c, share)
@@ -706,9 +764,9 @@ local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed
         c.ns.db.nodes[ZONE] = list
         local k = 0
         for _, s in ipairs(freshNodes) do
-            if math.random() < share then
+            if wrandom() < share then
                 k = k + 1
-                list[#list + 1] = { id = "o" .. s.id, type = s.type, x = s.x, y = s.y, name = s.name, item = s.item, count = math.random(1, 9) }
+                list[#list + 1] = { id = "o" .. s.id, type = s.type, x = s.x, y = s.y, name = s.name, item = s.item, count = wrandom(1, 9) }
             end
         end
         c.ns.NotifyNodesChanged()
@@ -717,13 +775,13 @@ local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed
     for i = 1, knowers do
         local c = NewClient("K" .. i, nil)
         clients[#clients + 1] = c
-        hpush({ at = NOW + math.random() * 60, fn = function() Login(c) end })
+        hpush({ at = NOW + wrandom() * 60, fn = function() Login(c) end })
     end
     -- their own questions at login are over and forgotten
     runUntil(NOW + 20 * 60)
     local knownMin, knownMax, knows = math.huge, 0, {}
     for _, c in ipairs(clients) do
-        local k = Teach(c, shareFrom + math.random() * (shareTo - shareFrom))
+        local k = Teach(c, shareFrom + wrandom() * (shareTo - shareFrom))
         knownMin, knownMax, knows[c.name] = math.min(knownMin, k), math.max(knownMax, k), k
     end
     net = { channel = 0, guild = 0, bySecond = {}, perSender = {}, bytes = 0, log = {} }
@@ -824,7 +882,7 @@ end
 -- one that goes out anyway. That case is printed, with what it costs.)
 local function EchoCase(title, knowers, world, echo, lateBy)
     Reset()
-    math.randomseed(21)
+    Seed(21)
     MakeFreshNodes(world)
     for i, s in ipairs(freshNodes) do s.id = 7000000 + i end
     net.latency, net.lateBy = 0.1, lateBy
@@ -902,7 +960,9 @@ local order = { "fuzz", "normal", "attack", "launch", "mega", "mega3k", "answers
 for _, name in ipairs(order) do
     if (ONLY == "all" and name ~= "mega3k") or ONLY == name then
         local t0 = os.clock()
+        trace.harvests, trace.logins, trace.sum = 0, 0, 0
         scenarios[name]()
+        print(("  World of \"%s\": %d harvests, %d logins, checksum %d"):format(name, trace.harvests, trace.logins, trace.sum))
         print(("  (simulated in %.1f s)"):format(os.clock() - t0))
     end
 end
