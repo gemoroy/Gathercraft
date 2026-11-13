@@ -1379,7 +1379,7 @@ local function Help()
     print(L["  /gcr rare         - test the rare alert"])
     print(L["  /gcr debug        - toggle debug output"])
     print("  /gcr test         - API check")
-    print("  /gcr perf         - sync load of the last minute and the addon's memory")
+    print("  /gcr perf         - sync messages and handler time of the last minute, the addon's memory")
     print(L["  /gcr scan         - scan auction house prices (at the auction house)"])
     print(L["  /gcr ahtest       - price sources and auction house check"])
 end

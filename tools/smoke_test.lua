@@ -8766,13 +8766,13 @@ step("/gcr perf: one line with the sync load of the last full minute and the mem
         advance(60 - GetTime() % 60 + 1)
         local line = Perf()
         assert(line:find("last full minute", 1, true), "no full minute named: " .. line)
-        assert(Number(line, "sync messages in (%d+)") == 71, "messages in: " .. line)
-        assert(Number(line, "out (%d+)") == sent, "messages out, want " .. sent .. ": " .. line)
-        assert(Number(line, "nodes read (%d+)") == 15 + 144 + 40, "nodes read, want 199: " .. line)
+        assert(Number(line, "sync messages received (%d+)") == 71, "messages in: " .. line)
+        assert(Number(line, "send attempts (%d+)") == sent, "messages out, want " .. sent .. ": " .. line)
+        assert(Number(line, "nodes announced (%d+)") == 15 + 144 + 40, "nodes read, want 199: " .. line)
         assert(Number(line, "(%d+) messages over the budget") == 5, "over the budget: " .. line)
         assert(Number(line, "(%d+) nodes over the limit per player") == 16, "over the limit: " .. line)
         assert(Number(line, "other addons' messages (%d+)") == 3, "other addons: " .. line)
-        assert(Number(line, "sync code ([%d.]+) ms") >= 0, "time: " .. line)
+        assert(Number(line, "time in the receive and send handlers ([%d.]+) ms") >= 0, "time: " .. line)
         assert(line:find("memory not readable in this client", 1, true), "no memory functions, and the line does not say so: " .. line)
         -- it only reads: asked again, the same numbers
         assert(Perf() == line, "asking twice changed the line")
@@ -8790,7 +8790,7 @@ step("/gcr perf: one line with the sync load of the last full minute and the mem
         -- a quiet minute is a full minute of zeros, not the busy one again
         advance(125)
         line = Perf()
-        assert(Number(line, "sync messages in (%d+)") == 0 and Number(line, "nodes read (%d+)") == 0, "two quiet minutes later: " .. line)
+        assert(Number(line, "sync messages received (%d+)") == 0 and Number(line, "nodes announced (%d+)") == 0, "two quiet minutes later: " .. line)
         -- the help names the command
         local mark, named = #log, false
         slash("help")
@@ -10113,7 +10113,7 @@ step("Sharing: when our own packet does not come back in time, we go on - and st
             local mark = #log
             slash("perf")
             for i = mark + 1, #log do
-                local back, sent = log[i]:match("own messages heard back (%d+) of (%d+)")
+                local back, sent = log[i]:match("own messages heard back (%d+) of (%d+) send attempts")
                 if back then return tonumber(back), tonumber(sent) end
             end
             error("/gcr perf does not say how many own messages were heard back", 0)
@@ -10218,6 +10218,59 @@ step("Sharing: the chat line turned off and on again within seconds - the line t
     db.announceOn, db.announceOff, db.enabled = saved.on, saved.off, saved.enabled
     if not wasOpen then ns.ToggleOptions() end
     advance(400)
+    if not ok then error(err, 0) end
+end)
+step("/gcr perf: the words say what is counted - send attempts, nodes announced before any check, time in the two handlers (v0.1.22 R1 S-N2)", function()
+    -- Codex, 13.11.2026 (S-N2): "sync code" is not all the work of sharing
+    -- (packing an answer runs in a timer of its own), "out" counts attempts,
+    -- not deliveries, and "nodes read" counts what a message announces before
+    -- any of it is checked. The line says so now. English only, as before.
+    local db = ns.db.sync
+    local saved = { enabled = db.enabled, pending = db.pending, counts = db.counts, send = C_ChatInfo.SendAddonMessage }
+    db.pending, db.counts = {}, nil
+    slash("sync on")
+    advance(700)
+    local function Perf()
+        local mark = #log
+        slash("perf")
+        for i = mark + 1, #log do if log[i]:find("^PRINT") and log[i]:find("perf (", 1, true) then return log[i] end end
+        error("/gcr perf printed nothing", 0)
+    end
+    local function Number(line, pattern)
+        local v = line:match(pattern)
+        assert(v, "not in the line (" .. pattern .. "): " .. line)
+        return tonumber(v)
+    end
+    local ok, err = pcall(function()
+        advance(60 - GetTime() % 60 + 1)
+        -- three entries that are no nodes at all, and two real ones: five were announced
+        fire("CHAT_MSG_ADDON", "Gathercraft", "N:1412;rubbish;more,rubbish;;o9611,h,1000,2000,2447;o9612,h,1100,2100,2447", "CHANNEL", "Stranger-Realm", nil, nil, nil, "GathercraftSync")
+        -- a send the client refuses is an attempt all the same
+        local tries = 0
+        C_ChatInfo.SendAddonMessage = function() tries = tries + 1 error("refused") end
+        local node = { id = "o1619", name = "Silverleaf", type = "herb", x = 0.36, y = 0.63, count = 1, last = time() }
+        table.insert(ns.db.nodes[1412], node)
+        ns.SyncShare(1412, node)
+        advance(10)
+        for i, n in ipairs(ns.db.nodes[1412]) do if n == node then table.remove(ns.db.nodes[1412], i) break end end
+        C_ChatInfo.SendAddonMessage = saved.send
+        assert(tries > 0, "test setup: nothing was tried")
+        advance(60 - GetTime() % 60 + 1)
+        local line = Perf()
+        assert(Number(line, "sync messages received (%d+)") == 1, "received: " .. line)
+        assert(Number(line, "send attempts (%d+)") == tries, "send attempts, want " .. tries .. ": " .. line)
+        assert(Number(line, "nodes announced (%d+) %(before any check%)") == 5, "nodes announced, want 5: " .. line)
+        assert(Number(line, "time in the receive and send handlers ([%d.]+) ms") >= 0, "time: " .. line)
+        assert(line:find("own messages heard back %d+ of %d+ send attempts since login"), "heard back: " .. line)
+        -- the old words, which said more than is measured, are gone
+        for _, old in ipairs({ "sync code", "nodes read", "messages in ", ", out " }) do
+            assert(not line:find(old, 1, true), "the line still says \"" .. old .. "\": " .. line)
+        end
+    end)
+    C_ChatInfo.SendAddonMessage = saved.send
+    db.pending, db.counts = saved.pending, saved.counts
+    if not saved.enabled then slash("sync off") end
+    advance(120)
     if not ok then error(err, 0) end
 end)
 -- (end of the v0.1.22 steps)

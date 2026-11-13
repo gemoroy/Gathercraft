@@ -97,10 +97,19 @@ end
 -- /gcr perf (v0.1.22 S3): what sharing cost in the last full minute.
 --   Sven, 12.11.2026: the channel is full, receivers refuse a lot, and
 --   nothing in the game said how much of the addon's time and memory is
---   sharing. Counted per minute: messages in and out, nodes read, what was
---   refused (the budget per second, the limit per player), messages of
---   other addons that pass our handler, and the time in the sync code
---   (receiving and sending). The command only reads.
+--   sharing. Counted per minute: messages received and send attempts,
+--   nodes announced, what was refused (the budget per second, the limit per
+--   player), messages of other addons that pass our handler, and the time
+--   in the two handlers. The command only reads.
+--   What the numbers are and are not (R1 S-N2; Codex, 13.11.2026):
+--     - "send attempts": every try to send, also one the client refused -
+--       not what arrived anywhere;
+--     - "nodes announced": the entries the messages carried, counted before
+--       any of them is checked - not what was taken;
+--     - "time in the receive and send handlers": the handler for incoming
+--       addon messages and the tick that sends one message. Not in it:
+--       work in timers (picking and packing an answer to a zone question,
+--       the chat line) and whatever else sharing sets off elsewhere.
 ---------------------------------------------------------------------------
 local perf = {} -- cur = the running minute, last = the one before it (nil in the first minute after login)
 
@@ -143,7 +152,7 @@ local function Perf()
     local kb = PerfMemory()
     -- (own messages heard back: since login - does this realm send our own
     -- messages back to us? AnswerStops counts on it and has a rule without it)
-    ns.Print(("perf (%s): sync messages in %d, out %d; nodes read %d; refused: %d messages over the budget, %d nodes over the limit per player; other addons' messages %d; sync code %.1f ms; own messages heard back %d of %d since login; %s"):format(
+    ns.Print(("perf (%s): sync messages received %d, send attempts %d; nodes announced %d (before any check); refused: %d messages over the budget, %d nodes over the limit per player; other addons' messages %d; time in the receive and send handlers %.1f ms; own messages heard back %d of %d send attempts since login; %s"):format(
         what, b.msgIn, b.msgOut, b.nodes, b.overBudget, b.overLimit, b.other, b.ms, perf.back or 0, perf.sent or 0,
         kb and ("memory %.1f MB"):format(kb / 1024) or "memory not readable in this client"))
 end
