@@ -9791,6 +9791,64 @@ step("/gcr paths: in every language the number of pieces stands with the pieces 
     end
     -- (that the command hands the pieces first and the zones second is checked in the W7 step: 6 pieces, 2 zones)
 end)
+step("Paths: after more than 2 seconds without a look no piece is made, also into the square next door (v0.1.22 R1, gap)", function()
+    -- Codex, 13.11.2026: with the check for a gap of more than 2 seconds
+    -- taken out, every step stayed green - a loading screen (the event) and a
+    -- jump over two squares were tested, the gap itself was not. Here: the
+    -- game stands still for a moment (a hitch, a loading screen without its
+    -- event), and you are seen again in the very next square.
+    local W = PathsWorld()
+    local keepClock = GetTime
+    local ok, err = pcall(function()
+        local clock = GetTime()
+        GetTime = function() return clock end
+        W.speed = 25
+        local function Look(x, y, after)
+            W.At(x, y)
+            clock = clock + (after or 0.5)
+            ns.PathsLook()
+        end
+        local function Piece(tx, row) return (ns.PathsPiece(1412, tx, row, 1, 0)) end
+        -- 20 yards made in square 12 (300-325), then seen in square 13 - `gap` seconds after the last look
+        local function Ride(row, gap)
+            local y = row * 25 + 12.5
+            clock = clock + 10
+            Look(302, y)
+            Look(312, y)
+            Look(322, y)
+            Look(327, y, gap)
+            return Piece(12, row)
+        end
+        assert(Ride(1, 0.5) == 1, "test setup: half a second later in the next square is a piece")
+        assert(Ride(2, 2) == 1, "exactly 2 seconds between two looks is still a piece")
+        assert(Ride(3, 2.5) == nil, "2.5 seconds without a look, then the next square: a piece was made")
+        assert(Ride(4, 30) == nil, "30 seconds without a look, then the next square: a piece was made")
+        -- ... and after the gap everything starts anew: the way made before it is not counted in
+        local y = 5 * 25 + 12.5
+        clock = clock + 10
+        W.speed = 10
+        Look(302, y) Look(307, y) Look(312, y) -- 10 yards made in square 12: not enough for a piece
+        Look(318, y, 5)                         -- a gap, still in square 12
+        Look(322, y)                            -- (seen again: a new start)
+        Look(327, y)                            -- across with 5 yards made since the gap
+        assert(Piece(12, 5) == nil, "the way made before a gap was counted in after it")
+        -- (without the gap the same looks are a piece: 15 yards made)
+        clock = clock + 10
+        y = 7 * 25 + 12.5
+        Look(302, y) Look(307, y) Look(312, y) Look(318, y) Look(322, y) Look(327, y)
+        assert(Piece(12, 7) == 1, "test setup: the same looks without a gap are a piece")
+        W.speed = 25
+        -- a clock that goes backwards makes nothing either
+        clock = clock + 10
+        y = 6 * 25 + 12.5
+        Look(302, y) Look(312, y) Look(322, y)
+        Look(327, y, -1)
+        assert(Piece(12, 6) == nil, "the clock went back and a piece was made")
+    end)
+    GetTime = keepClock
+    W.Done()
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
