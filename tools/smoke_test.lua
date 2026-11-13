@@ -10273,6 +10273,54 @@ step("/gcr perf: the words say what is counted - send attempts, nodes announced 
     advance(120)
     if not ok then error(err, 0) end
 end)
+step("/gcr perf: after minutes in which nothing at all ran, the last full minute is a quiet one - not the busy one again (v0.1.22 R1, S3)", function()
+    -- Codex, 13.11.2026: the branch for "the minute before was skipped" can be
+    -- reached outside the game after all - the clock goes on 125 s while not
+    -- even the send ticker runs (a loading screen, a frozen client). The step
+    -- of S3 could not show it: there the ticker touches the counters every
+    -- 1.2 s, so no minute is ever skipped.
+    local db = ns.db.sync
+    local saved = { enabled = db.enabled, pending = db.pending, counts = db.counts, clock = GetTime }
+    db.pending, db.counts = {}, nil
+    slash("sync on")
+    advance(700)
+    local function Perf()
+        local mark = #log
+        slash("perf")
+        for i = mark + 1, #log do if log[i]:find("^PRINT") and log[i]:find("perf (", 1, true) then return log[i] end end
+        error("/gcr perf printed nothing", 0)
+    end
+    local function Received(line) return tonumber(line:match("sync messages received (%d+)")) end
+    local ok, err = pcall(function()
+        -- to the start of a minute, then five messages in it
+        advance(60 - GetTime() % 60 + 1)
+        for k = 1, 5 do
+            fire("CHAT_MSG_ADDON", "Gathercraft", ("N:1698;o95%d,h,%d,%d,2447"):format(1000 + k, 1000 + k * 7, 2000 + k * 5), "CHANNEL", "Stranger" .. k .. "-Realm", nil, nil, nil, "GathercraftSync")
+        end
+        advance(2)
+        -- the clock jumps on by 125 s, nothing ran in between
+        local jump = 125
+        GetTime = function() return saved.clock() + jump end
+        local line = Perf()
+        assert(line:find("last full minute", 1, true), "not the last full minute: " .. line)
+        assert(Received(line) == 0, "125 s later, nothing ran in between: the busy minute is shown again: " .. line)
+        -- one minute on exactly, nothing ran: the minute before is the busy one, and it is shown
+        GetTime = saved.clock
+        advance(60 - GetTime() % 60 + 1)
+        for k = 1, 3 do
+            fire("CHAT_MSG_ADDON", "Gathercraft", ("N:1698;o95%d,h,%d,%d,2447"):format(2000 + k, 1100 + k * 7, 2100 + k * 5), "CHANNEL", "Other" .. k .. "-Realm", nil, nil, nil, "GathercraftSync")
+        end
+        jump = 60
+        GetTime = function() return saved.clock() + jump end
+        line = Perf()
+        assert(Received(line) == 3, "one minute later the minute before is not shown: " .. line)
+    end)
+    GetTime = saved.clock
+    db.pending, db.counts = saved.pending, saved.counts
+    if not saved.enabled then slash("sync off") end
+    advance(180)
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
