@@ -57,6 +57,43 @@ local function Dir(dx, dy) return (dy + 1) * 3 + (dx + 1) end
 --   value = (((swims * 256 + falls) * 1024 + cost) * 256 + count) * 16384 + day
 --           (what is mostly 0 sits on top: the number stays short in the file)
 ---------------------------------------------------------------------------
+-- Saved data can come back damaged (a file cut off, an edit by hand, a
+-- version in between). It is looked through once when it is taken over -
+-- never at every look - and put right where it is damaged, nowhere else
+-- (R1 W-H1): a zone that is no zone goes, a zone without its table of pieces
+-- starts empty, a piece that is not one whole number goes, and every count
+-- is what is really there. Whoever recorded nothing wrong loses nothing.
+local VALUE_MAX = 2 ^ 48
+local KEY_MAX = GRID * GRID * 9
+local function LookThrough(p)
+    local total, gone = 0, {}
+    for mapID, z in pairs(p.zones) do
+        local n = 0
+        if type(mapID) == "number" and type(z) == "table" then
+            if type(z.e) ~= "table" then z.e = {} end
+            local bad
+            for key, v in pairs(z.e) do
+                if type(key) == "number" and type(v) == "number" and key >= 0 and key < KEY_MAX and key == floor(key)
+                    and v >= 0 and v < VALUE_MAX and v == floor(v) then
+                    n = n + 1
+                else
+                    bad = bad or {}
+                    bad[#bad + 1] = key
+                end
+            end
+            if bad then
+                for _, key in ipairs(bad) do z.e[key] = nil end
+            end
+            z.n = n
+        end
+        if n == 0 then gone[#gone + 1] = mapID end
+        total = total + n
+    end
+    for _, mapID in ipairs(gone) do p.zones[mapID] = nil end
+    p.total = total
+end
+
+local lookedThrough -- the saved table that was looked through (another one after a login or a profile change: again)
 local function DB()
     local db = ns.db
     if not db then return end
@@ -67,6 +104,10 @@ local function DB()
     end
     if type(p.zones) ~= "table" then p.zones, p.total = {}, 0 end
     if type(p.total) ~= "number" then p.total = 0 end
+    if lookedThrough ~= p then
+        lookedThrough = p
+        LookThrough(p)
+    end
     return p
 end
 
@@ -102,6 +143,11 @@ local function Prune(p, onlyZone)
                 total = total + 1
             end
         end
+    end
+    if total < (onlyZone and MAX_ZONE or MAX_TOTAL) then
+        -- no limit is reached: a count was wrong, not the data. Nothing has to go.
+        LookThrough(p)
+        return 0
     end
     local need = max(1, floor(total * PRUNE_SHARE + 0.5))
     local order = {}

@@ -9462,6 +9462,136 @@ step("Paths: on by default with a switch in the options, a note once, /gcr paths
     W.Done()
     if not ok then error(err, 0) end
 end)
+step("Paths: damaged saved path data is put right once, only where it is damaged, and makes no error (v0.1.22 R1 W-H1)", function()
+    -- Codex, 13.11.2026 (W-H1): a zone without its table of pieces, a zone
+    -- without its count, a total that does not fit - each made a Lua error
+    -- while riding. The saved data is looked through once when it is taken
+    -- over (not at every look): what is damaged is put right or dropped, in
+    -- the zone it is in.
+    local W = PathsWorld()
+    local HBD = LibStub("HereBeDragons-2.0")
+    local row = 200
+    local ok, err = pcall(function()
+        HBD.GetZoneSize = function(_, mapID) if mapID >= 1411 and mapID <= 1414 then return W.w, W.h end return 0, 0 end
+        -- a real piece to build saved data from
+        W.Start(100, row)
+        W.Go(1, 0, 60)
+        local key, value
+        for k, v in pairs(ns.db.paths.zones[1412].e) do key, value = k, v end
+        assert(key and W.Total() == 2, "test setup: a ride of 60 yards makes 2 pieces")
+        -- the saved data fits itself: every zone counts what it holds, the total is the sum
+        local function Fits()
+            local p = ns.db.paths
+            if type(p) ~= "table" or type(p.zones) ~= "table" or type(p.total) ~= "number" then return "no zones or no total" end
+            local sum = 0
+            for mapID, z in pairs(p.zones) do
+                if type(mapID) ~= "number" or type(z) ~= "table" then return "zone " .. tostring(mapID) .. " is no zone" end
+                if type(z.e) ~= "table" or type(z.n) ~= "number" then return "zone " .. mapID .. ": e is a " .. type(z.e) .. ", n a " .. type(z.n) end
+                local n = 0
+                for k, v in pairs(z.e) do
+                    if type(k) ~= "number" or type(v) ~= "number" or v ~= math.floor(v) or v < 0 or v >= 2 ^ 48 then return "zone " .. mapID .. " holds " .. tostring(k) .. " = " .. tostring(v) end
+                    n = n + 1
+                end
+                if n ~= z.n then return "zone " .. mapID .. " counts " .. z.n .. " and holds " .. n end
+                if n == 0 then return "zone " .. mapID .. " is kept empty" end
+                sum = sum + n
+            end
+            if sum ~= p.total then return "the total is " .. p.total .. ", there are " .. sum end
+        end
+        -- loads `saved` as the saved data, rides 60 yards in zone 1412 and looks at /gcr paths
+        local function Loaded(what, saved, want)
+            row = row + 2
+            local errorsBefore = #errors
+            -- (the saved table is taken over with its first use - no login is played here: every
+            -- login in this test world starts the tickers of all modules once more)
+            ns.db.paths = saved
+            W.Start(100, row)
+            W.Go(1, 0, 60)
+            slash("paths")
+            assert(#errors == errorsBefore, what .. ": " .. tostring(errors[#errors]))
+            assert(W.Piece(100, row, 1, 0) == 1 and W.Piece(101, row, 1, 0) == 1, what .. ": the ride after it is not recorded")
+            local wrong = Fits()
+            assert(not wrong, what .. ": " .. tostring(wrong))
+            if want then assert(W.Total() == want, what .. ": " .. W.Total() .. " pieces, want " .. want) end
+        end
+        local function Zone(n) return { n = n or 1, e = { [key] = value } } end
+
+        -- Codex's three shapes
+        Loaded("a zone without its pieces", { hinted = true, total = 0, zones = { [1412] = { n = 0 } } }, 2)
+        Loaded("a zone without its count", { hinted = true, total = 0, zones = { [1412] = { e = {} } } }, 2)
+        Loaded("a full total and nothing there", { hinted = true, total = 30000, zones = {} }, 2)
+        -- the wrong kind of thing in every place
+        Loaded("the paths are a text", "paths", 2)
+        Loaded("the zones are a number", { hinted = true, total = 3, zones = 5 }, 2)
+        Loaded("the total is a text", { hinted = true, total = "many", zones = { [1411] = Zone() } }, 3)
+        Loaded("a zone is a text", { hinted = true, total = 1, zones = { [1412] = "zone" } }, 2)
+        Loaded("a zone under a name", { hinted = true, total = 1, zones = { Mulgore = Zone() } }, 2)
+        Loaded("a count that is a text, pieces that are a text", { hinted = true, total = 5, zones = { [1412] = { n = "5", e = "pieces" } } }, 2)
+        Loaded("a count that is a text over real pieces", { hinted = true, total = 1, zones = { [1412] = { n = "1", e = { [key] = value } } } }, 3)
+        Loaded("pieces that are no whole numbers", { hinted = true, total = 8, zones = { [1412] = { n = 8, e = {
+            [key] = value, [key + 9] = "text", [key + 18] = true, [key + 27] = 1.5, [key + 36] = -1, [key + 45] = 2 ^ 50, [key + 54] = 0 / 0,
+            name = value, [1.5] = value, [-9] = value } } } }, 3)
+        -- counts that do not fit what is there
+        Loaded("a zone that counts too many", { hinted = true, total = 99, zones = { [1411] = Zone(99) } }, 3)
+        Loaded("a total that is too small", { hinted = true, total = 0, zones = { [1411] = Zone(), [1413] = Zone() } }, 4)
+        Loaded("an empty zone", { hinted = true, total = 0, zones = { [1413] = { n = 0, e = {} } } }, 2)
+        assert(ns.db.paths.zones[1413] == nil, "an empty zone is kept")
+
+        -- only the damaged zone: its neighbour keeps every piece as it was, and what was chosen stays chosen
+        local healthy = { n = 3, e = { [key] = value, [key + 9] = value + 16384, [key + 18] = value + 5 * 16384 } }
+        Loaded("one damaged zone beside a healthy one", { hinted = true, off = nil, total = 3, zones = { [1411] = healthy, [1412] = { n = 7 } } }, 5)
+        local z = ns.db.paths.zones[1411]
+        assert(z == healthy and z.n == 3 and z.e[key] == value and z.e[key + 9] == value + 16384 and z.e[key + 18] == value + 5 * 16384, "the healthy zone was touched")
+        assert(ns.db.paths.hinted == true, "the note is forgotten")
+        ns.db.paths = { hinted = true, off = true, total = 1, zones = { [1412] = { n = 0 } } }
+        local errorsBefore = #errors
+        slash("paths")
+        assert(#errors == errorsBefore and ns.PathsEnabled() == false and ns.db.paths.off == true, "damaged data, and the recording that was off is on (or an error)")
+        ns.PathsSetEnabled(true)
+
+        -- making room where there is nothing is harmless: a full count over an empty zone
+        Loaded("a zone that counts 8000 and holds nothing", { hinted = true, total = 8000, zones = { [1412] = { n = 8000, e = {} } } }, 2)
+
+        -- ... also when a count goes wrong while playing: nothing goes, the counts are put right
+        ns.db.paths.total = 30000
+        ns.db.paths.zones[1412].n = 8000
+        local held = 0
+        for _ in pairs(ns.db.paths.zones[1412].e) do held = held + 1 end
+        row = row + 2
+        local errorsNow = #errors
+        W.Start(100, row)
+        W.Go(1, 0, 60)
+        assert(#errors == errorsNow and not Fits(), "counts gone wrong while playing: " .. tostring(errors[#errors] or Fits()))
+        assert(ns.db.paths.zones[1412].n == held + 2, "making room with wrong counts took pieces away: " .. ns.db.paths.zones[1412].n .. " of " .. (held + 2))
+
+        -- once, not at every look: what breaks later in another zone is not looked for while riding
+        Loaded("healthy data", { hinted = true, total = 1, zones = { [1411] = Zone() } }, 3)
+        ns.db.paths.zones[1413] = { n = 5 }
+        row = row + 2
+        W.Start(100, row)
+        W.Go(1, 0, 60)
+        local later = ns.db.paths.zones[1413]
+        assert(later and later.n == 5 and later.e == nil, "the saved data is looked through again while riding")
+        ns.db.paths.zones[1413] = nil
+
+        -- looking through the most there can be takes a moment, not a second
+        local full = { hinted = true, total = 30000, zones = {} }
+        for m = 1411, 1414 do
+            local e, n = {}, m == 1414 and 6000 or 8000
+            for i = 1, n do e[i * 9 + 5] = value end
+            full.zones[m] = { n = n, e = e }
+        end
+        ns.db.paths = full
+        local t0 = os.clock()
+        local total = ns.PathsCount()
+        local took = (os.clock() - t0) * 1000
+        assert(total == 30000, "30000 healthy pieces: " .. tostring(total) .. " kept")
+        note(("paths: looking through 30000 saved pieces once took %.1f ms"):format(took))
+        assert(took < 500, ("looking through the saved paths took %.0f ms"):format(took))
+    end)
+    W.Done()
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
