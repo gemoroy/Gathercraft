@@ -217,8 +217,20 @@ local function Record(p, mapID, tx, ty, dx, dy, cost, fell, swam)
             if fell then falls = falls + 1 end
             if swam then swims = swims + 1 end
         end
-        -- (at the top of the count the mean follows new crossings slowly, and the shares stay)
-        mean = floor(mean + (hundredths - mean) / count + 0.5)
+        -- The kept cost goes towards this crossing's by the step of the mean
+        -- ((new - kept) / count, rounded to a hundredth) and by one hundredth
+        -- at least whenever the two differ (R1 W-M2: rounding the mean itself
+        -- lost every step under half a hundredth - after 255 crossings at
+        -- 2.00 a thousand at 1.00 changed nothing). So: with few crossings it
+        -- is the mean; a cost ridden again and again is reached after at
+        -- most as many crossings as it is hundredths away; with mixed costs
+        -- and many crossings it settles near the one ridden most (the
+        -- middle one), not at the mean. Nothing more is kept for it.
+        local diff = hundredths - mean
+        if diff ~= 0 then
+            local step = max(1, floor(math.abs(diff) / count + 0.5))
+            mean = mean + (diff > 0 and step or -step)
+        end
         z.e[key] = Pack(count, max(100, min(COST_MAX, mean)), falls, swims, Today())
         return
     end

@@ -9660,6 +9660,92 @@ step("Paths: a crossing you are carried over is no piece, however far you went y
     W.Done()
     if not ok then error(err, 0) end
 end)
+step("Paths: the cost of a piece follows what you ride now and never freezes, also after 255 crossings (v0.1.22 R1 W-M2)", function()
+    -- Codex, 13.11.2026 (W-M2): 255 crossings at cost 2.00, then 1000 straight
+    -- ones at 1.00 - the cost stayed 2.00, every small step of the mean was
+    -- rounded away. The rule now: a crossing moves the kept cost towards its
+    -- own by the step of the mean ((new - kept) / count, rounded to a
+    -- hundredth), and by one hundredth at least whenever the two differ.
+    local W = PathsWorld()
+    local keepClock = GetTime
+    local ok, err = pcall(function()
+        local clock = GetTime()
+        GetTime = function() return clock end
+        local day = math.floor(time() / 86400) - 20454
+        local function Value(count, cost) return (cost * 256 + count) * 16384 + day end
+        local function Key(tx, ty) return (ty * 1024 + tx) * 9 + 5 end -- (the piece east out of the square)
+        local function Look(x, y)
+            W.At(x, y)
+            clock = clock + 0.5
+            ns.PathsLook()
+        end
+        -- rides east over square 14 of the row `times` times, `per` yards forward a look (the way made
+        -- is the speed x half a second a look: at 25 yards a second 12.5 forward is straight, cost 1.00)
+        local function Cross(row, times, per)
+            per = per or 12.5
+            for _ = 1, times do
+                clock = clock + 10
+                local x, y = 337.5, row * 25 + 12.5
+                Look(x, y)
+                while x < 380 do
+                    x = x + per
+                    Look(x, y)
+                end
+            end
+        end
+        local function Cost(row) return select(2, ns.PathsPiece(1412, 14, row, 1, 0)) end
+        local function Count(row) return (ns.PathsPiece(1412, 14, row, 1, 0)) end
+        W.speed = 25
+
+        -- test setup: a straight crossing costs exactly 1.00, one at half the pace forward 2.00
+        Cross(1, 1)
+        assert(Count(1) == 1 and Cost(1) == 1, "test setup: a straight crossing costs " .. tostring(Cost(1)))
+        Cross(2, 1, 6.25)
+        assert(Cost(2) == 2, "test setup: twice the way costs " .. tostring(Cost(2)))
+
+        -- Codex's case: 255 crossings at 2.00 are kept, then straight ones
+        ns.db.paths = { hinted = true, total = 1, zones = { [1412] = { n = 1, e = { [Key(14, 10)] = Value(255, 200) } } } }
+        assert(Count(10) == 255 and Cost(10) == 2, "test setup: a piece crossed 255 times at 2.00")
+        Cross(10, 1)
+        assert(Cost(10) < 2, "after 255 crossings at 2.00 one at 1.00 leaves the cost at " .. Cost(10))
+        Cross(10, 49)
+        assert(Count(10) == 255, "the count went past 255")
+        assert(math.abs(Cost(10) - 1.5) < 0.005, ("50 straight crossings after 255 at 2.00: cost %.2f, want 1.50"):format(Cost(10)))
+        Cross(10, 50)
+        assert(Cost(10) == 1, ("100 straight crossings after 255 at 2.00: cost %.2f, want 1.00"):format(Cost(10)))
+        Cross(10, 20)
+        assert(Cost(10) == 1, "the cost went past what is ridden: " .. Cost(10))
+        -- ... and up again the same way
+        Cross(10, 30, 6.25)
+        assert(math.abs(Cost(10) - 1.3) < 0.005, ("30 crossings at 2.00 after that: cost %.2f, want 1.30"):format(Cost(10)))
+
+        -- a small difference is not lost before the count is full either: 10 crossings at 1.00, then 1.04
+        ns.db.paths = { hinted = true, total = 1, zones = { [1412] = { n = 1, e = { [Key(14, 12)] = Value(10, 100) } } } }
+        W.speed = 26 -- (26 yards made for the 25 forward)
+        Cross(12, 1)
+        local first = Cost(12)
+        assert(first == 1.01, "a crossing at 1.04 after ten at 1.00 leaves the cost at " .. first)
+        Cross(12, 5)
+        assert(Count(12) == 16 and Cost(12) == 1.04, ("six crossings at 1.04 after ten at 1.00: cost %.2f, want 1.04"):format(Cost(12)))
+        W.speed = 25
+
+        -- with few crossings it is the plain mean: 2.00 and 1.00 are 1.50, a third at 1.00 makes 1.33
+        Cross(14, 1, 6.25)
+        Cross(14, 1)
+        assert(Cost(14) == 1.5, "2.00 and 1.00: " .. Cost(14))
+        Cross(14, 1)
+        assert(math.abs(Cost(14) - 1.33) < 0.006, "2.00, 1.00, 1.00: " .. Cost(14))
+        -- the step is never larger than the difference, and the cost stays between 1.00 and 10.23
+        ns.db.paths = { hinted = true, total = 2, zones = { [1412] = { n = 2, e = { [Key(14, 16)] = Value(1, 101), [Key(14, 18)] = Value(255, 1023) } } } }
+        Cross(16, 1)
+        assert(Cost(16) == 1, "1.01 and 1.00 made " .. Cost(16))
+        Cross(18, 1, 0.5)
+        assert(Cost(18) == 10.23, "a cost over the top made " .. Cost(18))
+    end)
+    GetTime = keepClock
+    W.Done()
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
