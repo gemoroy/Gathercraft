@@ -306,8 +306,15 @@ local function Look()
     if dx == 0 and dy == 0 then return end
     if dx >= -1 and dx <= 1 and dy >= -1 and dy <= 1 then
         local line = TILE * ((dx ~= 0 and dy ~= 0) and SQRT2 or 1)
-        -- carried across (a boat, a lift, a knock-back) is no way of yours
-        if here.way >= line * MIN_WAY then
+        -- Carried across (a boat, a lift, a knock-back) is no way of yours
+        -- (R1 W-M1). The rule for standing and being carried:
+        --   - seen in the next square with no speed of your own: no piece,
+        --     however far you went in the square before. (Stopping within
+        --     the half second after the edge looks the same and is not kept
+        --     either; the next ride over it is.)
+        --   - standing still changes nothing: the way made so far stays;
+        --   - the square you arrive in starts from nothing either way.
+        if speed > 0 and here.way >= line * MIN_WAY then
             Record(p, mapID, here.tx, here.ty, dx, dy, here.way / line, here.fell, here.swam)
         end
     end

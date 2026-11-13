@@ -9592,6 +9592,74 @@ step("Paths: damaged saved path data is put right once, only where it is damaged
     W.Done()
     if not ok then error(err, 0) end
 end)
+step("Paths: a crossing you are carried over is no piece, however far you went yourself before it (v0.1.22 R1 W-M1)", function()
+    -- Codex, 13.11.2026 (W-M1): 12 yards on your own feet up to the edge of a
+    -- square, then carried across it with no speed of your own - a piece was
+    -- kept, as if you had gone there yourself. The rule now:
+    --   - a crossing seen while your own speed is 0 is never a piece;
+    --   - standing still changes nothing: the way made in the square stays;
+    --   - after a carried crossing the next square starts from nothing.
+    local W = PathsWorld()
+    local ok, err = pcall(function()
+        -- Codex's run: from the middle of a square 7, 4, 1 and 0.4 yards at 14, 8, 2 and 1 yards a
+        -- second, then one yard across the edge at speed 0
+        W.Start(100, 50)
+        for _, s in ipairs({ { 7, 14 }, { 4, 8 }, { 1, 2 }, { 0.4, 1 } }) do
+            W.speed = s[2]
+            W.Step(s[1], 0)
+        end
+        assert(W.Total() == 0, "test setup: still in the first square")
+        W.speed = 0
+        W.Step(1, 0)
+        assert(select(1, ns.PathsSquare(1412, player.x, player.y)) == 101, "test setup: carried into the next square")
+        assert(W.Total() == 0 and W.Piece(100, 50, 1, 0) == nil, "carried across the edge after a way of your own: a piece was kept")
+        -- ... and the square you were set down in starts from nothing: the way before does not count for it
+        W.speed = 7
+        W.Go(1, 0, 3.5 * 7) -- from 0.9 yards into square 101 to 25.4: just across, 24.5 yards made
+        local count, cost = W.Piece(101, 50, 1, 0)
+        assert(count == 1 and cost <= 1.05, ("the square after a carried crossing: count %s, cost %s (the way before it was counted in)"):format(tostring(count), tostring(cost)))
+
+        -- carried over several squares, walking a little in between: no piece of a carried crossing
+        W.Start(100, 54)
+        local before = W.Total()
+        for _ = 1, 6 do
+            W.speed = 7
+            W.Step(3.5, 0)  -- a few steps on the deck
+            W.speed = 0
+            W.Step(12, 0)   -- the boat moves on
+            W.Step(12, 0)
+        end
+        local x = select(1, ns.PathsSquare(1412, player.x, player.y))
+        assert(x >= 106, "test setup: carried six squares on, at " .. tostring(x))
+        local made = W.Total() - before
+        assert(made == 0, "carried over six squares with a few steps of your own: " .. made .. " pieces")
+
+        -- standing still at the edge and then going on yourself is a piece as before
+        W.Start(100, 58)
+        W.speed = 7
+        W.Go(1, 0, 10.5) -- 2 yards from the edge
+        W.speed = 0
+        advance(20)
+        W.speed = 7
+        W.Go(1, 0, 7)
+        count, cost = W.Piece(100, 58, 1, 0)
+        assert(count == 1 and cost <= 1.15, ("a rest before the edge, then across yourself: count %s, cost %s"):format(tostring(count), tostring(cost)))
+        -- stopped right behind the edge (speed 0 at the look that sees the new square): not kept -
+        -- it cannot be told from being pushed over, and the next ride there keeps it
+        W.Start(100, 60)
+        W.speed = 7
+        W.Go(1, 0, 10.5)
+        W.speed = 0
+        W.Step(3.5, 0)
+        assert(W.Piece(100, 60, 1, 0) == nil, "seen in the next square with no speed: kept")
+        W.Start(100, 60)
+        W.speed = 7
+        W.Go(1, 0, 30)
+        assert(W.Piece(100, 60, 1, 0) == 1, "the next ride over the same edge is not kept")
+    end)
+    W.Done()
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
