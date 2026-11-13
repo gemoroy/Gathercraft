@@ -54,6 +54,7 @@ local MAX_RESPONDERS = 3
 local ANSWER_WAIT_MIN, ANSWER_WAIT_MAX = 2, 15 -- seconds: the random wait before an answer starts
 local ANSWER_MORE_SHARE = 0.2 -- a zone question is answered only with this much more than the asker knows ...
 local ANSWER_MORE_NODES = 20  -- ... and at least this many nodes more (see WorthAnswering)
+local ANSWER_MIN_NODES = 2    -- ... and never fewer than this many, in all and more than the asker knows
 local PENDING_MAX_AGE = 7 * 24 * 3600
 local PENDING_MAX_AGE_NEW = 14 * 24 * 3600 -- zones without known spawn points (new Forever zones): keep them longer
 local PENDING_MAX_TOTAL = 2000 -- unconfirmed reports kept in all zones together
@@ -713,10 +714,15 @@ end
 -- knows, so somebody who knows nothing is told whatever there is. The two
 -- numbers only say how many each side knows, not which: an answer of about
 -- the asker's size is mostly what he has, and it costs a message per 8 nodes.
+--   Never with one node, and never for one node more (R1 S-M2; Sven,
+-- 13.11.2026): a message with a single node is a harvest for everyone who
+-- hears it, not an answer - nobody could count it, so nobody stopped. That
+-- node goes out with its next harvest. So the first packet of every answer
+-- has two nodes or more (two always fit in one message).
 local function WorthAnswering(ownCount, theirCount)
     local sent = math.min(ownCount, RATE_MAX_NODES)
-    local more = math.max(math.ceil(theirCount * ANSWER_MORE_SHARE), math.min(ANSWER_MORE_NODES, theirCount))
-    return sent > theirCount and sent >= theirCount + more
+    local more = math.max(math.ceil(theirCount * ANSWER_MORE_SHARE), math.min(ANSWER_MORE_NODES, theirCount), ANSWER_MIN_NODES)
+    return sent >= ANSWER_MIN_NODES and sent >= theirCount + more
 end
 
 local function OnQuery(body, sender, distribution)

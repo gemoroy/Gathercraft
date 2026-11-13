@@ -694,10 +694,10 @@ local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed
     end
     -- their own questions at login are over and forgotten
     runUntil(NOW + 20 * 60)
-    local knownMin, knownMax = math.huge, 0
+    local knownMin, knownMax, knows = math.huge, 0, {}
     for _, c in ipairs(clients) do
         local k = Teach(c, shareFrom + math.random() * (shareTo - shareFrom))
-        knownMin, knownMax = math.min(knownMin, k), math.max(knownMax, k)
+        knownMin, knownMax, knows[c.name] = math.min(knownMin, k), math.max(knownMax, k), k
     end
     net = { channel = 0, guild = 0, bySecond = {}, perSender = {}, bytes = 0, log = {} }
     local asker = NewClient("Asker", nil)
@@ -736,6 +736,34 @@ local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed
     table.sort(each, function(x, y) return x > y end)
     print("  Messages of each answering player: " .. (#each > 0 and table.concat(each, " ") or "-"))
     print(("  The asker knows %d now (%d new); %d of the nodes sent were of no use to him"):format(now, now - before, nodes - (now - before)))
+    -- The contract (R1 S-M2; Sven, 13.11.2026, E1) - checked, not only printed:
+    --   - at most 3 players go past their first packet, so at most 3 answers
+    --     of more than one packet are complete;
+    --   - nobody answers with a single node, and no answer starts with one;
+    --   - when somebody knows enough for an answer, one complete answer at
+    --     least arrives; when nobody does, nobody answers.
+    local sentBy, firstNodes = {}, {}
+    for _, m in ipairs(net.log) do
+        if m.kind == "N" and m.from ~= "Asker" then
+            sentBy[m.from] = (sentBy[m.from] or 0) + m.nodes
+            firstNodes[m.from] = firstNodes[m.from] or m.nodes
+        end
+    end
+    local beyond, complete, worth = 0, 0, 0
+    for _, name in ipairs(senders) do
+        if senders[name] > 1 then beyond = beyond + 1 end
+        if sentBy[name] >= math.min(knows[name] or math.huge, 150) then complete = complete + 1 end
+        if firstNodes[name] < 2 then addError(("%s: %s answered with a first packet of %d node(s)"):format(title, name, firstNodes[name])) end
+    end
+    for _, k in pairs(knows) do
+        local sent = math.min(k, 150)
+        local more = math.max(math.ceil(before * 0.2), math.min(20, before), 2)
+        if sent >= 2 and sent >= before + more then worth = worth + 1 end
+    end
+    print(("  Contract: %d could answer; %d went past their first packet (at most 3), %d complete answers"):format(worth, beyond, complete))
+    if beyond > 3 then addError(("%s: %d players went past their first packet, at most 3 may"):format(title, beyond)) end
+    if worth > 0 and complete < 1 then addError(("%s: %d players knew enough, and no complete answer arrived"):format(title, worth)) end
+    if worth == 0 and #senders > 0 then addError(("%s: nobody knew enough for an answer, and %d answered"):format(title, #senders)) end
     return { answering = #senders, messages = messages, nodes = nodes, gained = now - before }
 end
 
@@ -750,6 +778,8 @@ scenarios.answers = function()
     AnswerCase("One question, 40 who know more, the asker knows 151 of 300", 40, 300, 0.5, 1, 151, 12)
     AnswerCase("One question, 40 who know a little more than the asker (100 of 120)", 40, 120, 0.85, 1, 100, 13)
     AnswerCase("One question, 8 who know more, the asker knows nothing", 8, 120, 0.5, 1, 0, 14)
+    AnswerCase("One question, 8 who know one node each, the asker knows nothing", 8, 1, 1, 1, 0, 15)
+    AnswerCase("One question, 8 who know the same 6 nodes (one packet each), the asker knows nothing", 8, 6, 1, 1, 0, 16)
 end
 
 local order = { "fuzz", "normal", "attack", "launch", "mega", "mega3k", "answers" }

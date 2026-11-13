@@ -9849,6 +9849,70 @@ step("Paths: after more than 2 seconds without a look no piece is made, also int
     W.Done()
     if not ok then error(err, 0) end
 end)
+step("Sharing: an answer has two nodes at least, and two more than the asker knows - a single node is left to the harvest (v0.1.22 R1 S-M2)", function()
+    -- Codex, 13.11.2026 (S-M2): eight players with one new node each all
+    -- answered one question - a message with one node does not count as an
+    -- answer for the others (it looks like a harvest), so nobody stopped.
+    -- Sven, 13.11.2026 (E1): who could add only one node does not answer; the
+    -- node comes with its next harvest. So every answer can be counted: its
+    -- first packet has two nodes or more.
+    local saved = ns.db.sync.enabled
+    slash("sync on")
+    advance(700)
+    local zones = {}
+    local function Ask(mapID, own, theirs, long)
+        zones[#zones + 1] = mapID
+        local list = {}
+        for i = 1, own do
+            -- (long: the longest a node can be in a message - ten digits of an id and of an item)
+            list[i] = { id = long and ("o42949%05d"):format(i) or ("o98" .. (1000 + i)), name = "X", type = "herb", x = 0.9 + i / 10000, y = 0.9 + i / 10000,
+                count = 1, last = 1, item = long and 2147483647 or 2447 }
+        end
+        ns.db.nodes[mapID] = list
+        ns.NotifyNodesChanged()
+        local from = #sentMessages
+        S22Msg(("Q:%d:%d"):format(mapID, theirs), "Asker" .. mapID .. "-Realm")
+        advance(60)
+        local packets = {}
+        for i = from + 1, #sentMessages do
+            if sentMessages[i]:find("^N:" .. mapID .. ";") then
+                local _, k = sentMessages[i]:gsub(";", ";")
+                packets[#packets + 1] = k
+            end
+        end
+        return packets
+    end
+    local function Sum(packets) local n = 0 for _, k in ipairs(packets) do n = n + k end return n end
+    local ok, err = pcall(function()
+        local cases = {
+            -- { own nodes, the asker's, nodes expected in the answer }
+            { 1, 0, 0 },  -- one node: no answer
+            { 2, 0, 2 },  -- two: an answer
+            { 2, 1, 0 },  -- one more than he knows: no answer
+            { 3, 1, 3 },  -- two more
+            { 3, 2, 0 },
+            { 4, 2, 4 },
+            { 5, 3, 0 },  -- (as before: he knows 3, so 3 more are wanted)
+            { 6, 3, 6 },
+        }
+        for i, c in ipairs(cases) do
+            local packets = Ask(1540 + i, c[1], c[2])
+            assert(Sum(packets) == c[3], ("we know %d, the asker %d: %d nodes sent, want %d"):format(c[1], c[2], Sum(packets), c[3]))
+        end
+        -- the first packet of every answer has two nodes or more - whatever the size, also with the longest nodes
+        for own = 2, 26 do
+            for _, long in ipairs({ false, true }) do
+                local packets = Ask(1560 + own * 2 + (long and 1 or 0), own, 0, long)
+                assert(Sum(packets) == own, ("%d nodes known (%s): %d sent"):format(own, long and "long" or "short", Sum(packets)))
+                assert(packets[1] >= 2, ("%d nodes known (%s): the first packet has %d"):format(own, long and "long" or "short", packets[1]))
+            end
+        end
+    end)
+    for _, mapID in ipairs(zones) do ns.db.nodes[mapID] = nil end
+    ns.NotifyNodesChanged()
+    if not saved then slash("sync off") end
+    if not ok then error(err, 0) end
+end)
 -- (end of the v0.1.22 steps)
 step("Gathering help: mark the node you walk towards, put back like fishing (v0.1.19 Q6 A)", function()
     local saved = { get = GetCVar, set = SetCVar, mark = ns.db.gatherMark, bobber = ns.db.fishMarkBobber, loud = ns.db.fishLoudSplash,
