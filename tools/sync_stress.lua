@@ -420,6 +420,18 @@ local function NewClient(name, guild)
     local ns = {}
     c.ns = ns
     c.E = E
+    -- (R2-M1) how many packets this player's answer has, as the addon plans
+    -- it: its line "answering zone ... with N nodes in M packets" is made
+    -- whether debug is on or not, and the contract tells long answers (more
+    -- than 2 packets) from short ones. Only read - nothing else changes.
+    c.planned = nil
+    local function Watch(debug)
+        return function(text, ...)
+            local m = type(text) == "string" and text:match("answering zone %d+ with %d+ nodes in (%d+) packets")
+            if m then c.planned = tonumber(m) end
+            return debug(text, ...)
+        end
+    end
     local toc = io.open(ROOT .. "/Gathercraft.toc"):read("*a")
     for line in toc:gmatch("[^\r\n]+") do
         if line:match("^Data") and line:match("%.lua$") and not line:match("QuestieNodes") then
@@ -439,8 +451,10 @@ local function NewClient(name, guild)
             setfenv(chunk, E)
             local ok, e = pcall(chunk, "Gathercraft", ns)
             if not ok then addError("load " .. line .. ": " .. tostring(e)) end
+            if ns.Debug and not c.watched then ns.Debug, c.watched = Watch(ns.Debug), true end
         end
     end
+    if not c.watched then addError(name .. ": no ns.Debug to read the size of an answer from") end
     return c
 end
 
@@ -747,6 +761,53 @@ scenarios.fuzz = function()
     Report("Fuzz (" .. #samples .. " broken messages)", 120)
 end
 
+-- The answer contract of 0.1.22 (Sven, 14.11.2026, R2-M1: it is written down
+-- as it is built, and replaces E1 of 13.11.), checked, not only printed -
+-- neither weaker nor stricter:
+--   - long answers (more than 2 packets): at most 3 players send more than 2
+--     packets. Where the own messages come back in time, at most 3 send more
+--     than 1. Where they do not, or late, a player who is not one of the
+--     three sends 2 packets at most and stops.
+--   - where only some players hear their own messages in time (mixed):
+--     at most 6 send more than 2 packets - the first 3 in the channel who
+--     hear themselves, and 3 more by name among the others (Sven,
+--     14.11.2026); everybody else sends 2 at most.
+--   - short answers (1 or 2 packets in all) may come from more than 3
+--     players - started together, they are out before they hear each other;
+--     nobody sends more than 2 of them;
+--   - nobody answers with a single node: every first packet has 2 or more;
+--   - when somebody knows enough for an answer, one complete answer at
+--     least arrives; when nobody does, nobody answers.
+--   players: { name, packets (sent), planned (the answer's packets),
+-- first (nodes in the first packet), complete }; echo: "in time" (everybody
+-- hears his own messages as the realms do), "not in time" (nobody does, or
+-- everybody late) or "mixed"; worth: how many knew enough.
+local MAX_LONG = { ["in time"] = 3, ["not in time"] = 3, mixed = 6 }
+local function CheckContract(title, players, echo, worth)
+    local overTwo, longOverOne, complete = 0, 0, 0
+    for _, p in ipairs(players) do
+        if p.packets > 2 then overTwo = overTwo + 1 end
+        if p.planned and p.planned > 2 and p.packets > 1 then longOverOne = longOverOne + 1 end
+        if p.complete then complete = complete + 1 end
+        if not p.planned then
+            addError(("%s: %s sent %d packet(s) of an answer whose size was never said"):format(title, p.name, p.packets))
+        elseif p.packets > p.planned then
+            addError(("%s: %s sent %d packets of an answer of %d"):format(title, p.name, p.packets, p.planned))
+        end
+        if p.first < 2 then addError(("%s: %s answered with a first packet of %d node(s)"):format(title, p.name, p.first)) end
+    end
+    local most = assert(MAX_LONG[echo], "echo: " .. tostring(echo))
+    print(("  Contract (own messages %s): %d knew enough; %d sent more than 2 packets (at most %d), %d went past the first packet of a long answer%s, %d complete answers")
+        :format(echo, worth, overTwo, most, longOverOne, echo == "in time" and " (at most 3)" or "", complete))
+    if overTwo > most then addError(("%s: %d players sent more than 2 packets, at most %d may"):format(title, overTwo, most)) end
+    if echo == "in time" and longOverOne > 3 then
+        addError(("%s: own messages back in time, and %d players went past the first packet of a long answer, at most 3 may"):format(title, longOverOne))
+    end
+    if worth > 0 and complete < 1 then addError(("%s: %d players knew enough, and no complete answer arrived"):format(title, worth)) end
+    if worth == 0 and #players > 0 then addError(("%s: nobody knew enough for an answer, and %d answered"):format(title, #players)) end
+    return complete
+end
+
 -- One question, many who could answer (v0.1.22 S; Sven's debug logs of
 -- 11. and 12.11.2026: 6-7 players answered one question, and one sent 150
 -- nodes to somebody who knew 151). `knowers` players stand in the zone and
@@ -788,6 +849,7 @@ local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed
     local asker = NewClient("Asker", nil)
     clients[#clients + 1] = asker
     local start = NOW
+    for _, c in ipairs(clients) do c.planned = nil end
     Login(asker)
     local before = 0
     if asked > 0 then
@@ -821,34 +883,26 @@ local function AnswerCase(title, knowers, world, shareFrom, shareTo, asked, seed
     table.sort(each, function(x, y) return x > y end)
     print("  Messages of each answering player: " .. (#each > 0 and table.concat(each, " ") or "-"))
     print(("  The asker knows %d now (%d new); %d of the nodes sent were of no use to him"):format(now, now - before, nodes - (now - before)))
-    -- The contract (R1 S-M2; Sven, 13.11.2026, E1) - checked, not only printed:
-    --   - at most 3 players go past their first packet, so at most 3 answers
-    --     of more than one packet are complete;
-    --   - nobody answers with a single node, and no answer starts with one;
-    --   - when somebody knows enough for an answer, one complete answer at
-    --     least arrives; when nobody does, nobody answers.
-    local sentBy, firstNodes = {}, {}
+    -- the contract (see CheckContract); everybody hears his own messages here, in time
+    local sentBy, firstNodes, byName = {}, {}, {}
+    for _, c in ipairs(clients) do byName[c.name] = c end
     for _, m in ipairs(net.log) do
         if m.kind == "N" and m.from ~= "Asker" then
             sentBy[m.from] = (sentBy[m.from] or 0) + m.nodes
             firstNodes[m.from] = firstNodes[m.from] or m.nodes
         end
     end
-    local beyond, complete, worth = 0, 0, 0
+    local players, worth = {}, 0
     for _, name in ipairs(senders) do
-        if senders[name] > 1 then beyond = beyond + 1 end
-        if sentBy[name] >= math.min(knows[name] or math.huge, 150) then complete = complete + 1 end
-        if firstNodes[name] < 2 then addError(("%s: %s answered with a first packet of %d node(s)"):format(title, name, firstNodes[name])) end
+        players[#players + 1] = { name = name, packets = senders[name], planned = byName[name].planned, first = firstNodes[name],
+            complete = sentBy[name] >= math.min(knows[name] or math.huge, 150) }
     end
     for _, k in pairs(knows) do
         local sent = math.min(k, 150)
         local more = math.max(math.ceil(before * 0.2), math.min(20, before), 2)
         if sent >= 2 and sent >= before + more then worth = worth + 1 end
     end
-    print(("  Contract: %d could answer; %d went past their first packet (at most 3), %d complete answers"):format(worth, beyond, complete))
-    if beyond > 3 then addError(("%s: %d players went past their first packet, at most 3 may"):format(title, beyond)) end
-    if worth > 0 and complete < 1 then addError(("%s: %d players knew enough, and no complete answer arrived"):format(title, worth)) end
-    if worth == 0 and #senders > 0 then addError(("%s: nobody knew enough for an answer, and %d answered"):format(title, #senders)) end
+    CheckContract(title, players, "in time", worth)
     return { answering = #senders, messages = messages, nodes = nodes, gained = now - before }
 end
 
@@ -875,12 +929,14 @@ end
 -- `world` nodes and wait the same time before they answer; every message
 -- reaches everybody 0.1 s after it was sent, in the order it was sent.
 --   echo: nil = everybody hears himself, "missing", "late" (5 s after the
--- others), or "mixed" (every second player hears himself, the others never).
--- Checked: one complete answer at least, three at most; with everybody alike
--- (no mix) the asker has everything afterwards. (An answer of two packets
--- cannot be held back where nobody hears himself - the second packet is the
--- one that goes out anyway. That case is printed, with what it costs.)
-local function EchoCase(title, knowers, world, echo, lateBy)
+-- others), "mixed" (every second player hears himself, the others never),
+-- or "first three" (only the first three in the channel hear themselves).
+--   reversed: the names go the other way round than the order in the
+-- channel (K8 sends first, K1 last) - with "mixed", those who never hear
+-- themselves then come first by name.
+-- Checked: the contract (see CheckContract); with everybody alike (no mix)
+-- the asker has everything afterwards.
+local function EchoCase(title, knowers, world, echo, lateBy, reversed)
     Reset()
     Seed(21)
     MakeFreshNodes(world)
@@ -888,7 +944,7 @@ local function EchoCase(title, knowers, world, echo, lateBy)
     net.latency, net.lateBy = 0.1, lateBy
     addonRandom = function(a, b) if a then return b and math.floor((a + b) / 2) or a end return 0.5 end
     for i = 1, knowers do
-        local c = NewClient("K" .. i, nil)
+        local c = NewClient("K" .. (reversed and (knowers - i + 1) or i), nil)
         clients[#clients + 1] = c
         Login(c)
     end
@@ -901,32 +957,42 @@ local function EchoCase(title, knowers, world, echo, lateBy)
         end
         c.ns.NotifyNodesChanged()
     end
-    if echo == "mixed" then
+    if echo == "mixed" or echo == "first three" then
+        -- mixed: every second one never hears himself; first three: only the first three in the channel hear themselves
         local without = {}
-        for i, c in ipairs(clients) do if i % 2 == 1 then without[c] = true end end
+        for i, c in ipairs(clients) do if (echo == "mixed" and i % 2 == 1) or (echo == "first three" and i > 3) then without[c] = true end end
         net.echo = function(c) return without[c] and "missing" or nil end
     else
         net.echo = echo
     end
     net.log = {}
+    for _, c in ipairs(clients) do c.planned = nil end
     local asker = NewClient("Asker", nil)
     clients[#clients + 1] = asker
     Login(asker)
     runUntil(NOW + 180)
-    local packets, nodes, names, messages = {}, {}, {}, 0
+    local packets, nodes, names, messages, first = {}, {}, {}, 0, {}
     for _, m in ipairs(net.log) do
         if m.kind == "N" and m.from ~= "Asker" then
-            if not packets[m.from] then names[#names + 1] = m.from end
+            if not packets[m.from] then names[#names + 1] = m.from first[m.from] = m.nodes end
             packets[m.from], nodes[m.from] = (packets[m.from] or 0) + 1, (nodes[m.from] or 0) + m.nodes
             messages = messages + 1
         end
     end
-    local each, complete = {}, 0
+    local byName = {}
+    for _, c in ipairs(clients) do byName[c.name] = c end
+    local each, players = {}, {}
     for i, name in ipairs(names) do
         each[i] = packets[name]
-        if nodes[name] >= world then complete = complete + 1 end
+        players[i] = { name = name, packets = packets[name], planned = byName[name].planned, first = first[name], complete = nodes[name] >= world }
     end
     table.sort(each, function(x, y) return x > y end)
+    -- who went on past the second packet, by name (with "mixed": those who never hear themselves are marked *)
+    local full = {}
+    for _, name in ipairs(names) do
+        if packets[name] > 2 then full[#full + 1] = name .. ((type(net.echo) == "function" and net.echo(byName[name])) and "*" or "") end
+    end
+    table.sort(full)
     local learned = 0
     for _, s in ipairs(freshNodes) do
         for _, n in ipairs(asker.ns.db.nodes[ZONE] or {}) do
@@ -935,25 +1001,33 @@ local function EchoCase(title, knowers, world, echo, lateBy)
     end
     print(("\n=== %s ==="):format(title))
     print(("  %d players know the same %d nodes and start together; own messages: %s"):format(knowers, world, echo and (echo .. (echo == "late" and (" by " .. (lateBy or 5) .. " s") or "")) or "heard back"))
-    print(("  Answering players: %d   messages: %d   packets of each: %s"):format(#names, messages, #each > 0 and table.concat(each, " ") or "-"))
-    print(("  Complete answers: %d   the asker learned %d of %d"):format(complete, learned, world))
-    if complete < 1 then addError(("%s: no complete answer (%d of %d learned)"):format(title, learned, world)) end
-    local twoPackets = (each[1] or 0) <= 2
-    if complete > 3 and echo ~= "mixed" and not (twoPackets and echo) then addError(("%s: %d complete answers, at most 3 may be"):format(title, complete)) end
-    if messages > 3 * (each[1] or 0) + 2 * #names then addError(("%s: %d messages, more than three answers and two packets of everybody else"):format(title, messages)) end
-    if echo ~= "mixed" and learned < world then addError(("%s: the asker learned %d of %d"):format(title, learned, world)) end
+    print(("  Answering players: %d   messages: %d   packets of each: %s   (planned: %s)"):format(#names, messages, #each > 0 and table.concat(each, " ") or "-",
+        players[1] and tostring(players[1].planned) or "-"))
+    print(("  The asker learned %d of %d   more than 2 packets: %s"):format(learned, world, #full > 0 and table.concat(full, " ") or "nobody"))
+    local worth = world >= 2 and knowers or 0 -- (the asker knows nothing: everybody who knows 2 or more knows enough)
+    local complete = CheckContract(title, players, echo == nil and "in time" or (echo == "mixed" or echo == "first three") and "mixed" or "not in time", worth)
+    if echo ~= "mixed" and echo ~= "first three" and learned < world then addError(("%s: the asker learned %d of %d"):format(title, learned, world)) end
     return complete, learned, messages
 end
 
 scenarios.echo = function()
-    EchoCase("Echo: 8 start together, everybody hears himself", 8, 120, nil)
-    EchoCase("Echo: 8 start together, nobody hears himself (Codex's echo-missing-ordered)", 8, 120, "missing")
-    EchoCase("Echo: 8 start together, the own message comes 5 s late", 8, 120, "late", 5)
-    EchoCase("Echo: 8 start together, the own message comes 0.9 s late (before the second packet)", 8, 120, "late", 0.9)
+    -- Codex's six cases of R2-M1 (14.11.2026), fixed: 8 start together with 120, 6 or 12 nodes.
+    -- Codex measured 14 14 14 1 1 1 1 1 / 14 14 14 2 2 2 2 2 (also 5 s and 0.9 s late) /
+    -- eight answers of 1 packet (with and without echo) / eight answers of 2 packets.
+    EchoCase("Echo: 8 start together, everybody hears himself (R2-M1: 120 nodes, echo in time)", 8, 120, nil)
+    EchoCase("Echo: 8 start together, nobody hears himself (Codex's echo-missing-ordered; R2-M1: 120 nodes, no echo)", 8, 120, "missing")
+    EchoCase("Echo: 8 start together, the own message comes 5 s late (R2-M1: 120 nodes, late)", 8, 120, "late", 5)
+    EchoCase("Echo: 8 start together, the own message comes 0.9 s late, before the second packet (R2-M1: 120 nodes, late)", 8, 120, "late", 0.9)
+    EchoCase("Echo: 8 start together with 6 nodes (one packet), everybody hears himself (R2-M1)", 8, 6, nil)
+    EchoCase("Echo: 8 start together with 6 nodes (one packet), nobody hears himself (R2-M1)", 8, 6, "missing")
+    EchoCase("Echo: 8 start together with 12 nodes (two packets), nobody hears himself (R2-M1)", 8, 12, "missing")
+    -- and around them
+    EchoCase("Echo: 8 start together with 12 nodes (two packets), everybody hears himself", 8, 12, nil)
     EchoCase("Echo: 8 start together, every second one never hears himself", 8, 120, "mixed")
+    EchoCase("Echo: 8 start together, every second one never hears himself, and those come first by name", 8, 120, "mixed", nil, true)
+    EchoCase("Echo: 8 start together, only the first three hear themselves, the others come first by name", 8, 120, "first three", nil, true)
     EchoCase("Echo: 40 start together, nobody hears himself", 40, 120, "missing")
     EchoCase("Echo: 3 start together, nobody hears himself", 3, 120, "missing")
-    EchoCase("Echo: 8 start together with 12 nodes (two packets), nobody hears himself", 8, 12, "missing")
 end
 
 local order = { "fuzz", "normal", "attack", "launch", "mega", "mega3k", "answers", "echo" }
