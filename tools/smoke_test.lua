@@ -12508,7 +12508,9 @@ step("What's new: 0.1.22 after an update, in this language and all translations"
         -- R2-M1: the answer contract of 14.11.2026, said as it is built
         "long answers come from at most three players", "very short answers can still come from a few more",
         "up to six can answer in full: three in the order of the channel and three by name", "it is out before they hear each other",
-        "the others stop after their second message", "at least one answer is sent in full" }) do
+        "the others stop after their second message", "at least one answer is sent in full",
+        -- R2 (Sven, 14.11.2026): fewer channel messages is not less traffic - the guild says it too
+        "guild messages rise from 1,372 to 1,933, because answers in a full zone now get through" }) do
         assert(changelog:find(said, 1, true), "CHANGELOG: nothing about \"" .. said .. "\"")
     end
     -- what the changelog must not promise (Codex, 13.11.2026)
