@@ -9843,11 +9843,14 @@ step("Paths: after more than 2 seconds without a look no piece is made, also int
         Look(302, y) Look(307, y) Look(312, y) Look(318, y) Look(322, y) Look(327, y)
         assert(Piece(12, 7) == 1, "test setup: the same looks without a gap are a piece")
         W.speed = 25
-        -- a clock that goes backwards makes nothing either
+        -- a clock that goes backwards makes nothing either. (A tenth of a
+        -- second only, and after 25 yards made: going back takes way off
+        -- again, and with too little left the rule for the way made alone
+        -- already makes no piece - 2.5 yards off 25 leave 22.5, enough.)
         clock = clock + 10
         y = 6 * 25 + 12.5
-        Look(302, y) Look(312, y) Look(322, y)
-        Look(327, y, -1)
+        Look(302, y) Look(308, y) Look(315, y) Look(322, y) -- (the first look after the pause is the start, the second the start in the square)
+        Look(327, y, -0.1)
         assert(Piece(12, 6) == nil, "the clock went back and a piece was made")
     end)
     GetTime = keepClock
