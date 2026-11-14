@@ -12616,8 +12616,15 @@ step("What's new: 0.1.22 after an update, in this language and all translations"
         "up to six can answer in full: three in the order of the channel and three by name", "it is out before they hear each other",
         "the others stop after their second message", "at least one answer is sent in full",
         -- R2 (Sven, 14.11.2026): fewer channel messages is not less traffic - the guild says it too
-        "guild messages rise from 1,372 to 1,933, because answers in a full zone now get through" }) do
+        "guild messages rise from 1,372 to 1,933, because answers in a full zone now get through",
+        -- "Alchimie" (Sven's live look of 14.11.2026): this client has no skill list, the profession window tells
+        "The game calls the profession \"Alchimie\" in the profession window", "Open your Alchemy window once after the update" }) do
         assert(changelog:find(said, 1, true), "CHANGELOG: nothing about \"" .. said .. "\"")
+    end
+    -- what the changelog must not promise about "Alchimie" (Sven's live look of 14.11.2026: no skill list in this
+    -- client, so /gcr crafttest lists none and /gcr debug names no line of it)
+    for _, said in ipairs({ "skill list", "/gcr crafttest", "/gcr debug", "named once per session" }) do
+        assert(not changelog:find(said, 1, true), "CHANGELOG still says \"" .. said .. "\"")
     end
     -- what the changelog must not promise (Codex, 13.11.2026)
     for _, said in ipairs({ "answer as before", "Sharing is quieter", "no order of the squares", "The client tells no height", "no two players stop each other",
