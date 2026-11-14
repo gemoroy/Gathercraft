@@ -12458,16 +12458,28 @@ step("What's new: 0.1.22 after an update, in this language and all translations"
     local f = assert(io.open(ROOT .. "/Welcome.lua"))
     local src = f:read("*a") f:close()
     local key = src:match('%["0%.1%.22"%] = "([^"]+)"')
-    assert(key and key:find("knows clearly more", 1, true) and key:find("stops early when three others are already answering", 1, true)
+    assert(key and key:find("knows clearly more", 1, true) and key:find("Long answers come from at most three players", 1, true)
+        and key:find("up to six where some players get their own messages back late", 1, true) and key:find("very short answers can still come from a few more", 1, true)
         and key:find("only on this computer, nothing is sent", 1, true) and key:find("Record the paths I ride", 1, true) and key:find("/gcr paths", 1, true),
         "no entry for 0.1.22 in Welcome.lua")
     -- said as it is: what Gathercraft itself does, not what a channel with
     -- older versions in it will look like; and the paths are not used yet
     -- (R1; Codex, 13.11.2026: "Sharing is quieter" is more than the numbers carry - a normal
     -- evening has 229 messages instead of 259 in the simulation, a launch day 428 instead of 436)
-    for _, word in ipairs({ "at most three", "faster", "lag", "never more than", "better routes", "routes now", "quieter", "less traffic" }) do
+    for _, word in ipairs({ "faster", "lag", "never more than", "better routes", "routes now", "quieter", "less traffic" }) do
         assert(not key:find(word, 1, true), "what's new 0.1.22 says \"" .. word .. "\"")
     end
+    -- "at most three" only for long answers (Sven, 14.11.2026, R2-M1: the
+    -- answer contract as it is built - short answers can come from more
+    -- players, and long ones from up to six where only some players get their
+    -- own messages back in time)
+    local function OnlyLong(text, what)
+        local low = text:lower()
+        local _, all = low:gsub("at most three", "")
+        local _, long = low:gsub("long answers come from at most three players", "")
+        assert(all == long, what .. " says \"at most three\" of answers that are not only the long ones")
+    end
+    OnlyLong(key, "what's new 0.1.22")
     assert(key:find("routes will use it later", 1, true), "what's new 0.1.22 does not say that the paths are for later")
     -- the entries before stay for players who skip a version
     assert(src:match('%["0%.1%.20"%] = "([^"]+)"') and src:match('%["0%.1%.21"%] = "([^"]+)"'), "the 0.1.20 or 0.1.21 entry is gone")
@@ -12486,20 +12498,25 @@ step("What's new: 0.1.22 after an update, in this language and all translations"
     local cf = assert(io.open(ROOT .. "/CHANGELOG.md"))
     local changelog = cf:read("*a") cf:close()
     assert(changelog:find("^## v0%.1%.22") and not changelog:find("## v0.1.21", 1, true), "CHANGELOG: not 0.1.22 only")
-    for _, said in ipairs({ "at most three players answer in full", "Older versions keep their old rule", "at least a fifth and at least 20 nodes more", "more than 125 new nodes",
+    for _, said in ipairs({ "Older versions keep their old rule", "at least a fifth and at least 20 nodes more", "more than 125 new nodes",
         "was already on its way", "`/gcr perf`", "English in every language", "squares of 25 yards", "nothing is sent", "Nothing uses the data yet",
         "30,000 path pieces", "Record the paths I ride", "`/gcr paths clear`", "uses no height", "not the live game",
         -- R1: Sven's decisions E1 and E2 of 13.11.2026, said as they are
         "after the first message of his answer at the latest", "who could add a single node does not answer", "only when all three name it",
         "which may or may not come", "nothing brings him what he missed", "send attempts (not what arrived)", "before any check",
-        "no list of the places in the order you went", "an estimate", "with the same players doing the same things before and after" }) do
+        "no list of the places in the order you went", "an estimate", "with the same players doing the same things before and after",
+        -- R2-M1: the answer contract of 14.11.2026, said as it is built
+        "long answers come from at most three players", "very short answers can still come from a few more",
+        "up to six can answer in full: three in the order of the channel and three by name", "it is out before they hear each other",
+        "the others stop after their second message", "at least one answer is sent in full" }) do
         assert(changelog:find(said, 1, true), "CHANGELOG: nothing about \"" .. said .. "\"")
     end
     -- what the changelog must not promise (Codex, 13.11.2026)
     for _, said in ipairs({ "answer as before", "Sharing is quieter", "no order of the squares", "The client tells no height", "no two players stop each other",
-        "waits for its next confirmation", "comes later" }) do
+        "waits for its next confirmation", "comes later", "at most three players answer", "An answer of one or two messages cannot always be held back" }) do
         assert(not changelog:find(said, 1, true), "CHANGELOG still says \"" .. said .. "\"")
     end
+    OnlyLong(changelog, "CHANGELOG")
     -- the numbers the changelog names are the code's
     local total, zone, tile = ns.PathsLimits()
     assert(total == 30000 and tile == 25, "the changelog says 30,000 pieces and squares of 25 yards; the code has " .. tostring(total) .. " and " .. tostring(tile))
