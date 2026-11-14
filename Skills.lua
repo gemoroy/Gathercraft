@@ -107,6 +107,15 @@ local function FindProfession(nodeType)
     return false, unclear
 end
 
+-- Which gathering or secondary skill a line of the skill list is, by its
+-- name (v0.1.22 R2: Crafting.lua tells these from names it does not know)
+ns.SkillKindOf = function(name)
+    if type(name) ~= "string" then return end
+    for kind, names in pairs(SKILL_NAMES) do
+        if names[name:lower()] or names[name] then return kind end
+    end
+end
+
 local function GetSkill(nodeType)
     local found, _, rank, maxRank, effective = FindProfession(nodeType)
     if found then return rank, maxRank, effective end

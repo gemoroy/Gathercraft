@@ -90,7 +90,10 @@ local profAlias
 local function ProfKey(name)
     if not name or name == "" then return name end
     if not profAlias then
-        profAlias = { smelting = "Mining", alchemie = "Alchemy" }
+        -- (v0.1.22 R2; Belgeron, CurseForge, 14.11.2026: the German client
+        -- says "Alchimie" in the skill list and the profession window, and
+        -- the spell's name was not that - the skill plan never found the skill)
+        profAlias = { smelting = "Mining", alchemie = "Alchemy", alchimie = "Alchemy" }
         for en, id in pairs(PROF_SPELLS) do
             profAlias[en:lower()] = en
             local loc = SpellNameOf(id)
@@ -1263,6 +1266,10 @@ local function CraftTest()
         print(("  %d. %s: profit %s (sells %s, costs %s)"):format(i, r.name, r.missing and "?" or ns.Money(r.profit),
             ValueText(r), CostText(r)))
     end
+    -- (v0.1.22 R2) which profession each line of the skill list is read as
+    if ns.SkillListLines then
+        for _, line in ipairs(ns.SkillListLines()) do print(line) end
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -1753,6 +1760,67 @@ ns.CraftSortRows = SortRows -- for the tests
 ns.CraftCostText = CostText -- for the tests (tools/smoke_test.lua)
 ns.CraftValueText = ValueText
 
+-- The skill list as professions (v0.1.22 R2; Belgeron, 14.11.2026): each
+-- line with the profession it is read as, section by section (a section is
+-- what stands under one header). A line that is none of the nine
+-- professions and no gathering or secondary skill, in a section that holds
+-- a primary profession we do know, is "not recognised": a name of the
+-- client's we do not know yet. (Weapon skills, languages and the like stand
+-- in sections of their own and are never called that.)
+local SKILL_AS = { herb = "Herbalism", ore = "Mining", skin = "Skinning", fish = "Fishing", cook = "Cooking", aid = "First Aid" }
+local PRIMARY = { Alchemy = true, Blacksmithing = true, Enchanting = true, Engineering = true, Leatherworking = true,
+    Tailoring = true, Mining = true, Herbalism = true, Skinning = true }
+local function SkillListAsProfessions()
+    local sections, cur = {}, nil
+    if not (GetNumSkillLines and GetSkillLineInfo) then return sections end
+    for i = 1, ns.Readable(GetNumSkillLines(), "skills") or 0 do
+        local name, isHeader, _, rank, _, _, maxRank = GetSkillLineInfo(i)
+        if not ns.AnySecret("skills", name, isHeader, rank, maxRank) and name then
+            if isHeader or not cur then
+                cur = { head = isHeader and name or "?", lines = {} }
+                sections[#sections + 1] = cur
+            end
+            if not isHeader then
+                local key = ProfKey(name)
+                local as = PROF_SPELLS[key] and key or SKILL_AS[ns.SkillKindOf and ns.SkillKindOf(name)]
+                cur.lines[#cur.lines + 1] = { name = name, rank = rank, maxRank = maxRank, as = as }
+                if PRIMARY[as] then cur.professions = true end
+            end
+        end
+    end
+    return sections
+end
+
+-- with /gcr debug: a line not recognised is named once per session
+local toldUnknown = {}
+local function TellUnknownSkillLines()
+    if not (ns.db and ns.db.debug) then return end
+    for _, s in ipairs(SkillListAsProfessions()) do
+        if s.professions then
+            for _, l in ipairs(s.lines) do
+                if not l.as and not toldUnknown[l.name] then
+                    toldUnknown[l.name] = true
+                    ns.Debug("profession name not recognised: " .. l.name)
+                end
+            end
+        end
+    end
+end
+
+-- for /gcr crafttest: what each line of the skill list is read as
+local function SkillListLines()
+    local out = {}
+    for _, s in ipairs(SkillListAsProfessions()) do
+        local parts = {}
+        for _, l in ipairs(s.lines) do
+            parts[#parts + 1] = ("%s %s/%s = %s"):format(l.name, tostring(l.rank), tostring(l.maxRank),
+                l.as or (s.professions and "not recognised" or "-"))
+        end
+        out[#out + 1] = ("  skill list [%s]: %s"):format(s.head, #parts > 0 and table.concat(parts, ", ") or "-")
+    end
+    return out
+end
+
 -- Your skill in a profession: the skill list, else what the profession
 -- window showed last time
 local SKILL_TYPE = { Mining = "ore", Cooking = "cook", ["First Aid"] = "aid" }
@@ -1762,6 +1830,7 @@ ns.ProfessionRank = function(prof)
         if rank then return rank, maxRank end
     end
     if GetNumSkillLines and GetSkillLineInfo then
+        TellUnknownSkillLines()
         for i = 1, ns.Readable(GetNumSkillLines(), "skills") or 0 do
             local name, isHeader, _, rank, _, _, maxRank = GetSkillLineInfo(i)
             if not ns.AnySecret("skills", name, isHeader, rank, maxRank)
@@ -1782,6 +1851,7 @@ ns.CraftData = {
     end,
 }
 ns.CraftTest = CraftTest
+ns.SkillListLines = SkillListLines
 
 -- /gcr trainertest : what this client tells us at a trainer (window open)
 ns.TrainerTest = function()

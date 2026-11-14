@@ -263,7 +263,7 @@ local SPELL_NAMES = { [2366] = "Herbalism", [2575] = "Mining", [3365] = "Opening
 if GERMAN then
     SPELL_NAMES = {
         [2366] = "Kräutersammeln", [2575] = "Bergbau", [3365] = "Öffnen", [7620] = "Angeln",
-        [2259] = "Alchimie", [2018] = "Schmiedekunst", [7411] = "Verzauberkunst", [4036] = "Ingenieurskunst",
+        [2259] = "Alchemie", [2018] = "Schmiedekunst", [7411] = "Verzauberkunst", [4036] = "Ingenieurskunst",
         [2108] = "Lederverarbeitung", [3908] = "Schneiderei", [2550] = "Kochkunst", [3273] = "Erste Hilfe",
         [2656] = "Verhüttung", [7420] = "Brust - Schwache Ausdauer", [3840] = "Schwere Leinenhandschuhe",
     }
@@ -10517,6 +10517,112 @@ step("Settings: no game setting is changed in combat - the gathering help and th
     ns.db.gatherMark, ns.db.gatherKey, ns.db.fishingCVars, ns.db.fishMarkBobber, ns.db.fishLoudSplash = saved.mark, saved.key, saved.cvars, saved.bobber, saved.loud
     if ns.StopFishing then ns.StopFishing() end
     player.map, player.x, player.y = saved.map, saved.x, saved.y
+    if not ok then error(err, 0) end
+end)
+step("Crafting: \"Alchimie\" is Alchemy - in the skill list, the skill plan and the profession window (v0.1.22 R2, German client)", function()
+    -- CurseForge, 14.11.2026 (Belgeron, German client): the skill plan never
+    -- found the Alchemy skill and kept asking to open the profession window.
+    -- The game says "Alchimie" in the skill list and the profession window;
+    -- Gathercraft knew "Alchemie" and the name of the spell 2259 (here, as in
+    -- the German mock: "Alchemie"). Cooking and First Aid were fine - they are
+    -- found by their own names (Skills.lua), not through ProfKey.
+    local keep = { gp = GetProfessions, gn = GetNumSkillLines, gi = GetSkillLineInfo, debug = ns.db.debug,
+        line = GetTradeSkillLine, num = GetNumTradeSkills, info = GetTradeSkillInfo, link = GetTradeSkillItemLink,
+        nr = GetTradeSkillNumReagents, ri = GetTradeSkillReagentInfo, rl = GetTradeSkillReagentItemLink, made = GetTradeSkillNumMade }
+    local mine = ns.db.recipes[next(ns.db.recipes)]
+    local function Copy(x) if type(x) ~= "table" then return x end local c = {} for k, v in pairs(x) do c[k] = Copy(v) end return c end
+    local keepAlchemy, keepDB = mine.Alchemy, Copy(ns.db.recipeDB and ns.db.recipeDB.Alchemy)
+    local lines = {}
+    local function Texts(text)
+        for _, o in ipairs(allFrames) do
+            local t = o.GetText and o:GetText()
+            if type(t) == "string" and o.IsShown and o:IsShown() and t:find(text, 1, true) then return t end
+        end
+    end
+    local function Said(text, from)
+        local n = 0
+        for i = from or 1, #log do if log[i]:find(text, 1, true) then n = n + 1 end end
+        return n
+    end
+    local ok, err = pcall(function()
+        mine.Alchemy = nil -- no profession window seen yet: only the skill list can tell
+        GetProfessions = nil
+        GetNumSkillLines = function() return #lines end
+        GetSkillLineInfo = function(i) return unpack(lines[i]) end
+        lines = {
+            { "Berufe", true, true }, { "Alchimie", false, nil, 120, 0, 0, 150 }, { "Kräuterkunde", false, nil, 130, 0, 0, 150 },
+            { "Sekundäre Fertigkeiten", true, true }, { "Kochkunst", false, nil, 75, 0, 0, 75 },
+            { "Waffenfertigkeiten", true, true }, { "Schwerter", false, nil, 300, 0, 0, 300 },
+        }
+        -- (1) the skill list
+        local rank, maxRank = ns.ProfessionRank("Alchemy")
+        assert(rank == 120 and maxRank == 150, ("skill line \"Alchimie\": Alchemy at %s/%s, want 120/150"):format(tostring(rank), tostring(maxRank)))
+        lines[2][1] = "Alchemie" -- (the spelling known before stays known)
+        rank = ns.ProfessionRank("Alchemy")
+        assert(rank == 120, "skill line \"Alchemie\": Alchemy at " .. tostring(rank))
+        lines[2][1] = "Alchimie"
+        -- (2) the skill plan shows it, instead of "open your profession window once"
+        ns.ShowSkillPlan("Alchemy") advance(1)
+        assert(Texts((ns.L["Your skill: %d / %d"]):format(120, 150)), "the skill plan does not show 120 / 150 for \"Alchimie\"")
+        assert(not Texts(ns.L["Your skill: ? (open your profession window once)"]), "the skill plan still asks to open the profession window")
+        if _G.GathercraftSkillPlan then _G.GathercraftSkillPlan:Hide() end
+        -- (3) the profession window says "Alchimie": its recipes are Alchemy's
+        GetTradeSkillLine = function() return "Alchimie", 77, 150 end
+        GetNumTradeSkills = function() return 1 end
+        GetTradeSkillInfo = function() return "Test Potion R2", "optimal" end
+        GetTradeSkillItemLink = function() return "|Hitem:118::|h" end
+        GetTradeSkillNumMade = function() return 1, 1 end
+        GetTradeSkillNumReagents = function() return 1 end
+        GetTradeSkillReagentInfo = function() return "Reagent", 134400, 1, 0 end
+        GetTradeSkillReagentItemLink = function() return "|Hitem:2447::|h" end
+        fire("TRADE_SKILL_SHOW") advance(1)
+        assert(mine.Alchemy and mine.Alchemy.rank == 77, "window \"Alchimie\": not stored as Alchemy (rank " .. tostring(mine.Alchemy and mine.Alchemy.rank) .. ")")
+        local n = 0
+        for _ in pairs(mine.Alchemy.list or {}) do n = n + 1 end
+        assert(n == 1, "window \"Alchimie\": " .. n .. " recipes under Alchemy, want 1")
+        assert(not mine.Alchimie and not (ns.db.recipeDB and ns.db.recipeDB.Alchimie), "a profession \"Alchimie\" was stored beside Alchemy")
+        lines = {}
+        assert(ns.ProfessionRank("Alchemy") == 77, "no skill list: the window's 77 is not the Alchemy skill")
+        -- (4) with /gcr debug: a line that looks like a profession but is none
+        -- of them is named once per session; nothing without debug
+        lines = {
+            { "Berufe", true, true }, { "Alchimistik", false, nil, 20, 0, 0, 75 }, { "Kräuterkunde", false, nil, 130, 0, 0, 150 },
+            { "Waffenfertigkeiten", true, true }, { "Schwerter", false, nil, 300, 0, 0, 300 },
+        }
+        local mark = #log
+        ns.db.debug = nil
+        ns.ProfessionRank("Alchemy")
+        assert(Said("profession name not recognised", mark + 1) == 0, "a debug line without debug")
+        ns.db.debug = true
+        ns.ProfessionRank("Alchemy") ns.ProfessionRank("Tailoring")
+        assert(Said("profession name not recognised: Alchimistik", mark + 1) == 1, "the unknown profession line is not named once: "
+            .. Said("profession name not recognised: Alchimistik", mark + 1))
+        assert(Said("Schwerter", mark + 1) == 0, "a weapon skill named as a profession")
+        assert(Said("Kräuterkunde", mark + 1) == 0, "Herbalism named as not recognised")
+        lines[2][1] = "Alchimie"
+        ns.ProfessionRank("Alchemy")
+        assert(Said("profession name not recognised: Alchimie", mark + 1) == 0, "\"Alchimie\" named as not recognised")
+        -- (5) /gcr crafttest says what each line of the skill list is read as (to send us)
+        lines = {
+            { "Berufe", true, true }, { "Alchimie", false, nil, 120, 0, 0, 150 }, { "Alchimistik", false, nil, 20, 0, 0, 75 },
+            { "Kräuterkunde", false, nil, 130, 0, 0, 150 }, { "Sekundäre Fertigkeiten", true, true }, { "Kochkunst", false, nil, 75, 0, 0, 75 },
+        }
+        mark = #log
+        slash("crafttest")
+        assert(Said("Alchimie 120/150 = Alchemy", mark + 1) == 1, "crafttest: no line \"Alchimie 120/150 = Alchemy\"")
+        assert(Said("Alchimistik 20/75 = not recognised", mark + 1) == 1, "crafttest: the unknown line is not marked")
+        assert(Said("Kräuterkunde 130/150 = Herbalism", mark + 1) == 1 and Said("Kochkunst 75/75 = Cooking", mark + 1) == 1, "crafttest: gathering or cooking line")
+        -- (6) the changelog says it
+        local cf = assert(io.open(ROOT .. "/CHANGELOG.md"))
+        local changelog = cf:read("*a") cf:close()
+        assert(changelog:find("the skill plan now finds your Alchemy skill", 1, true) and changelog:find("\"Alchimie\"", 1, true), "CHANGELOG: nothing about \"Alchimie\"")
+    end)
+    GetProfessions, GetNumSkillLines, GetSkillLineInfo, ns.db.debug = keep.gp, keep.gn, keep.gi, keep.debug
+    GetTradeSkillLine, GetNumTradeSkills, GetTradeSkillInfo, GetTradeSkillItemLink = keep.line, keep.num, keep.info, keep.link
+    GetTradeSkillNumReagents, GetTradeSkillReagentInfo, GetTradeSkillReagentItemLink, GetTradeSkillNumMade = keep.nr, keep.ri, keep.rl, keep.made
+    mine.Alchemy, mine.Alchimie = keepAlchemy, nil
+    if ns.db.recipeDB then ns.db.recipeDB.Alchimie, ns.db.recipeDB.Alchemy = nil, keepDB end
+    if _G.GathercraftSkillPlan then _G.GathercraftSkillPlan:Hide() end
     if not ok then error(err, 0) end
 end)
 -- (end of the v0.1.22 steps)
